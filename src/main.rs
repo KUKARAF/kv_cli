@@ -9,7 +9,7 @@ use client::Client;
 use config::Config;
 
 #[derive(Parser)]
-#[command(name = "kv", about = "CLI for kv_manager")]
+#[command(name = "kv", about = "CLI for kv_manager", version = env!("APP_VERSION"))]
 struct Cli {
     /// Override base URL (or set KV_BASE_URL env var)
     #[arg(long, global = true, env = "KV_BASE_URL")]

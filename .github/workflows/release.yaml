@@ -42,6 +42,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          BASE=$(cat VERSION | tr -d '[:space:]')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "tag=$BASE.$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -53,10 +61,14 @@ jobs:
 
       - name: Build (native)
         if: "!matrix.cross"
+        env:
+          VERSION: ${{ steps.version.outputs.tag }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
+        env:
+          VERSION: ${{ steps.version.outputs.tag }}
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Package (unix)
@@ -81,6 +93,15 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version
+        id: version
+        run: |
+          BASE=$(cat VERSION | tr -d '[:space:]')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "tag=$BASE.$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -88,7 +109,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
           files: artifacts/*
           prerelease: false
