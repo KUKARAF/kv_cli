@@ -61,15 +61,17 @@ jobs:
 
       - name: Build (native)
         if: "!matrix.cross"
+        run: cargo build --release --target ${{ matrix.target }}
         env:
           VERSION: ${{ steps.version.outputs.tag }}
-        run: cargo build --release --target ${{ matrix.target }}
+          CARGO_INCREMENTAL: "0"
 
       - name: Build (cross)
         if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
         env:
           VERSION: ${{ steps.version.outputs.tag }}
-        run: cross build --release --target ${{ matrix.target }}
+          CARGO_INCREMENTAL: "0"
 
       - name: Package (unix)
         if: runner.os != 'Windows'
