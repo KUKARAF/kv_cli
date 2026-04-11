@@ -110,6 +110,25 @@ impl Client {
         Ok(resp)
     }
 
+    /// Make a request with an explicit API key token (not from config).
+    pub async fn get_with_api_key(&self, path: &str, api_key: &str) -> Result<Response> {
+        let url = format!("{}{}", self.base_url, path);
+        Ok(self.http.get(&url)
+            .header("X-Api-Key", api_key)
+            .send()
+            .await
+            .with_context(|| format!("request to {url} failed"))?)
+    }
+
+    pub async fn post_with_api_key(&self, path: &str, api_key: &str) -> Result<Response> {
+        let url = format!("{}{}", self.base_url, path);
+        Ok(self.http.post(&url)
+            .header("X-Api-Key", api_key)
+            .send()
+            .await
+            .with_context(|| format!("request to {url} failed"))?)
+    }
+
     pub async fn expect_success(resp: Response) -> Result<String> {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

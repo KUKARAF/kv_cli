@@ -24,6 +24,9 @@ enum Cmd {
     /// Get a value by key
     Get {
         key: String,
+        /// API key token for approval-required or one-time share links
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Set a value
     Set {
@@ -92,8 +95,8 @@ async fn run() -> Result<()> {
     let mut client = Client::new(cfg, cli.base_url);
 
     match cli.command {
-        Cmd::Get { key } => {
-            commands::kv::get(&mut client, &key).await?;
+        Cmd::Get { key, token } => {
+            commands::kv::get(&mut client, &key, token).await?;
         }
         Cmd::Set { key, value, scope, ttl, sliding, open } => {
             commands::kv::set(&mut client, &key, value, scope, ttl, sliding, open).await?;
