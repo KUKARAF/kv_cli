@@ -54,14 +54,9 @@ fn opt_f64(v: &Option<f64>) -> String {
 
 pub async fn get(client: &mut Client, key: &str) -> Result<()> {
     let path = format!("/kv/{key}");
-    let resp = client.request_api_key(Method::GET, &path, None::<&()>).await?;
+    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
     let body = Client::expect_success(resp).await?;
-    // Parse JSON string value if the server wraps it
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body.clone()));
-    match value {
-        serde_json::Value::String(s) => print!("{s}"),
-        other => print!("{other}"),
-    }
+    print!("{body}");
     Ok(())
 }
 
@@ -97,7 +92,7 @@ pub async fn set(
             open_access: open,
         };
         let resp = client
-            .request_api_key(Method::PUT, &path, Some(&body))
+            .request_bearer(Method::PUT, &path, Some(&body))
             .await?;
         Client::expect_success(resp).await?;
     }
@@ -109,7 +104,7 @@ pub async fn list(client: &mut Client, prefix: Option<String>) -> Result<()> {
         Some(p) => format!("/kv?prefix={}", urlencoding(p)),
         None => "/kv".to_string(),
     };
-    let resp = client.request_api_key(Method::GET, &path, None::<&()>).await?;
+    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
     let body = Client::expect_success(resp).await?;
     let entries: Vec<KvEntry> = serde_json::from_str(&body)
         .unwrap_or_else(|_| vec![]);
@@ -124,7 +119,7 @@ pub async fn list(client: &mut Client, prefix: Option<String>) -> Result<()> {
 pub async fn delete(client: &mut Client, key: &str) -> Result<()> {
     let path = format!("/kv/{key}");
     let resp = client
-        .request_api_key(Method::DELETE, &path, None::<&()>)
+        .request_bearer(Method::DELETE, &path, None::<&()>)
         .await?;
     Client::expect_success(resp).await?;
     eprintln!("deleted {key}");
