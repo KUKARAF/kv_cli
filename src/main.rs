@@ -2,7 +2,7 @@ mod client;
 mod commands;
 mod config;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use client::Client;
@@ -14,6 +14,10 @@ struct Cli {
     /// Override base URL (or set KV_BASE_URL env var)
     #[arg(long, global = true, env = "KV_BASE_URL")]
     base_url: Option<String>,
+
+    /// Do not prompt for a session token (fail instead of escalating)
+    #[arg(long, global = true)]
+    silent: bool,
 
     #[command(subcommand)]
     command: Cmd,
@@ -55,9 +59,17 @@ enum Cmd {
     Delete {
         key: String,
     },
+    /// Store an API key in local config
+    AddApiToken {
+        /// The API key to store (prompted securely if omitted)
+        token: Option<String>,
+    },
     /// Manage API keys
     #[command(subcommand)]
     Keys(KeysCmd),
+    /// Session management
+    #[command(subcommand)]
+    Session(SessionCmd),
 }
 
 #[derive(Subcommand)]
@@ -81,6 +93,13 @@ enum KeysCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// Check if the current session token is valid.
+    /// Exits 0 if valid, 1 if expired or missing. No output — safe for scripting.
+    Check,
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
@@ -92,7 +111,7 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::load()?;
-    let mut client = Client::new(cfg, cli.base_url);
+    let mut client = Client::new(cfg, cli.base_url, cli.silent);
 
     match cli.command {
         Cmd::Get { key, token } => {
@@ -107,6 +126,16 @@ async fn run() -> Result<()> {
         Cmd::Delete { key } => {
             commands::kv::delete(&mut client, &key).await?;
         }
+        Cmd::AddApiToken { token } => {
+            let key = match token {
+                Some(t) => t,
+                None => rpassword::prompt_password("API key: ")
+                    .context("failed to read API key")?,
+            };
+            client.cfg.api_key = Some(key.trim().to_string());
+            client.cfg.save()?;
+            eprintln!("API key saved to config.");
+        }
         Cmd::Keys(keys_cmd) => match keys_cmd {
             KeysCmd::List => {
                 commands::keys::list(&mut client).await?;
@@ -118,6 +147,11 @@ async fn run() -> Result<()> {
                 commands::keys::revoke(&mut client, &id).await?;
             }
         },
+        Cmd::Session(SessionCmd::Check) => {
+            if !commands::session::check(&client).await {
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())

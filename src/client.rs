@@ -7,6 +7,7 @@ use crate::config::Config;
 pub struct Client {
     pub cfg: Config,
     pub base_url: String,
+    pub silent: bool,
     http: reqwest::Client,
 }
 
@@ -16,14 +17,27 @@ enum Auth {
 }
 
 impl Client {
-    pub fn new(cfg: Config, base_url_override: Option<String>) -> Self {
+    pub fn new(cfg: Config, base_url_override: Option<String>, silent: bool) -> Self {
         let base_url = base_url_override
             .unwrap_or_else(|| cfg.base_url().to_string());
         let base_url = base_url.trim_end_matches('/').to_string();
         Self {
             cfg,
             base_url,
+            silent,
             http: reqwest::Client::new(),
+        }
+    }
+
+    /// Check if the stored session token is valid without prompting.
+    /// Returns true if the token exists and the server accepts it.
+    pub async fn is_session_valid(&self) -> bool {
+        if self.cfg.session_token.is_none() {
+            return false;
+        }
+        match self.send_with_auth(Method::GET, "/kv", &Auth::Bearer, None::<&()>).await {
+            Ok(resp) => resp.status() != StatusCode::UNAUTHORIZED,
+            Err(_) => false,
         }
     }
 
@@ -83,12 +97,42 @@ impl Client {
         Ok(resp)
     }
 
+    /// Try with session token without prompting.
+    /// Returns Some(response) if the token exists and the server returns non-401.
+    /// Returns None if no token is stored or the token is expired (401).
+    pub async fn try_bearer_silent(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&impl Serialize>,
+    ) -> Result<Option<Response>> {
+        if self.cfg.session_token.is_none() {
+            return Ok(None);
+        }
+        let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            Ok(None)
+        } else {
+            Ok(Some(resp))
+        }
+    }
+
     pub async fn request_bearer(
         &mut self,
         method: Method,
         path: &str,
         body: Option<&impl Serialize>,
     ) -> Result<Response> {
+        if self.silent {
+            if self.cfg.session_token.is_none() {
+                bail!("no session token configured (--silent mode)");
+            }
+            let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
+            if resp.status() == StatusCode::UNAUTHORIZED {
+                bail!("session token expired (--silent mode)");
+            }
+            return Ok(resp);
+        }
         self.cfg.require_session_token()?;
         let resp = self
             .send_with_auth(method.clone(), path, &Auth::Bearer, body)
