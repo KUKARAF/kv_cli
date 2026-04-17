@@ -9,7 +9,7 @@ use crate::client::Client;
 
 #[derive(Serialize)]
 struct ScopeRule {
-    key_pattern: String,
+    scope: String,
     ops: Vec<String>,
 }
 
@@ -102,7 +102,7 @@ fn parse_scopes(raw: &[String]) -> Result<Vec<ScopeRule>> {
                 .ok_or_else(|| anyhow::anyhow!("invalid scope format {s:?} — expected pattern:ops"))?;
             let ops = ops_str.split(',').map(|o| o.trim().to_string()).collect();
             Ok(ScopeRule {
-                key_pattern: pattern.trim().to_string(),
+                scope: pattern.trim().to_string(),
                 ops,
             })
         })
