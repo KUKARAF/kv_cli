@@ -74,20 +74,19 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
                 print!("{}", resp.text().await.unwrap_or_default());
                 return Ok(());
             }
-            401 => bail!("API key expired or invalid"),
-            403 => {
+            401 | 403 => {
                 let body: serde_json::Value =
                     serde_json::from_str(&resp.text().await.unwrap_or_default())
                         .unwrap_or_default();
                 if body["error"].as_str() == Some("pending approval") {
                     return get_with_token(client, key, &api_key).await;
                 }
-                // Scope error — escalate to session token
+                // Key expired/invalid or insufficient scope — escalate to session token
                 if client.silent {
-                    bail!("API key has insufficient scope (--silent prevents session token fallback)");
+                    bail!("API key expired, invalid, or has insufficient scope (--silent prevents session token fallback)");
                 }
                 let had_session_token = client.cfg.session_token.is_some();
-                eprintln!("API key scope insufficient, trying session token…");
+                eprintln!("API key unavailable, trying session token…");
                 if let Some(resp) = client.try_bearer_silent(Method::GET, &path, None::<&()>).await? {
                     let body = Client::expect_success(resp).await?;
                     print!("{body}");
