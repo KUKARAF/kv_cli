@@ -37,3 +37,9 @@ jobs:
           tag_name: ${{ env.TAG }}
           name: ${{ env.TAG }}
           files: dist/kv-linux-amd64.tar.gz
+
+      - name: Trigger home-manager update
+        run: |
+          gh workflow run "Update package sources" --repo KUKARAF/home-manager
+        env:
+          GH_TOKEN: ${{ secrets.HOME_MANAGER_PAT }}
