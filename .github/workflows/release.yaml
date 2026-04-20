@@ -115,3 +115,8 @@ jobs:
           name: ${{ steps.version.outputs.tag }}
           files: artifacts/*
           prerelease: false
+
+      - name: Trigger home-manager update
+        run: gh workflow run "Update package sources" --repo KUKARAF/home-manager
+        env:
+          GH_TOKEN: ${{ secrets.HOME_MANAGER_DISPATCH_TOKEN }}
