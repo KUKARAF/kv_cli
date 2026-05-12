@@ -53,12 +53,14 @@ impl Client {
 
         match auth {
             Auth::ApiKey => {
-                let key = self.cfg.api_key.as_deref().unwrap_or_default();
-                req = req.header("X-Api-Key", key);
+                if let Some(key) = self.cfg.api_key.as_deref() {
+                    req = req.header("X-Api-Key", key);
+                }
             }
             Auth::Bearer => {
-                let token = self.cfg.session_token.as_deref().unwrap_or_default();
-                req = req.header("Authorization", format!("Bearer {}", token));
+                if let Some(token) = self.cfg.session_token.as_deref() {
+                    req = req.header("Authorization", format!("Bearer {}", token));
+                }
             }
         }
 
@@ -97,62 +99,73 @@ impl Client {
         Ok(resp)
     }
 
-    /// Try with session token without prompting.
-    /// Returns Some(response) if the token exists and the server returns non-401.
-    /// Returns None if no token is stored or the token is expired (401).
-    pub async fn try_bearer_silent(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&impl Serialize>,
-    ) -> Result<Option<Response>> {
-        if self.cfg.session_token.is_none() {
-            return Ok(None);
-        }
-        let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
-        if resp.status() == StatusCode::UNAUTHORIZED {
-            Ok(None)
-        } else {
-            Ok(Some(resp))
-        }
-    }
+     /// Try with session token without prompting.
+     /// Returns Some(response) if the token exists and the server returns non-401.
+     /// Returns None if no token is stored or the token is expired (401).
+     /// Silently removes the token from config if it's invalid.
+     pub async fn try_bearer_silent(
+         &mut self,
+         method: Method,
+         path: &str,
+         body: Option<&impl Serialize>,
+     ) -> Result<Option<Response>> {
+         if self.cfg.session_token.is_none() {
+             return Ok(None);
+         }
+         let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
+         if resp.status() == StatusCode::UNAUTHORIZED {
+             // Token is invalid — remove it silently for next time
+             self.cfg.session_token = None;
+             let _ = self.cfg.save();
+             Ok(None)
+         } else {
+             Ok(Some(resp))
+         }
+     }
 
-    pub async fn request_bearer(
-        &mut self,
-        method: Method,
-        path: &str,
-        body: Option<&impl Serialize>,
-    ) -> Result<Response> {
-        if self.silent {
-            if self.cfg.session_token.is_none() {
-                bail!("no session token configured (--silent mode)");
-            }
-            let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
-            if resp.status() == StatusCode::UNAUTHORIZED {
-                bail!("session token expired (--silent mode)");
-            }
-            return Ok(resp);
-        }
-        self.cfg.require_session_token()?;
-        let resp = self
-            .send_with_auth(method.clone(), path, &Auth::Bearer, body)
-            .await?;
-        if resp.status() == StatusCode::UNAUTHORIZED {
-            eprintln!("Token expired. Get a new one from the admin UI (Copy Session Token button).");
-            let new_token = rpassword::prompt_password("New session token: ")
-                .context("failed to read session token")?;
-            self.cfg.session_token = Some(new_token.trim().to_string());
-            self.cfg.save()?;
-            let resp2 = self
-                .send_with_auth(method, path, &Auth::Bearer, body)
-                .await?;
-            if resp2.status() == StatusCode::UNAUTHORIZED {
-                bail!("Authentication failed after retry");
-            }
-            return Ok(resp2);
-        }
-        Ok(resp)
-    }
+     pub async fn request_bearer(
+         &mut self,
+         method: Method,
+         path: &str,
+         body: Option<&impl Serialize>,
+     ) -> Result<Response> {
+         if self.silent {
+             if self.cfg.session_token.is_none() {
+                 bail!("no session token configured (--silent mode)");
+             }
+             let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
+             if resp.status() == StatusCode::UNAUTHORIZED {
+                 bail!("session token expired (--silent mode)");
+             }
+             return Ok(resp);
+         }
+         self.cfg.require_session_token()?;
+         let resp = self
+             .send_with_auth(method.clone(), path, &Auth::Bearer, body)
+             .await?;
+         if resp.status() == StatusCode::UNAUTHORIZED {
+             eprintln!("Session token invalid or expired. Removing old token.");
+             // Clear the invalid token from config
+             self.cfg.session_token = None;
+             self.cfg.save()?;
+             eprintln!("Get a new one from the admin UI (Copy Session Token button).");
+             let new_token = rpassword::prompt_password("New session token: ")
+                 .context("failed to read session token")?;
+             self.cfg.session_token = Some(new_token.trim().to_string());
+             self.cfg.save()?;
+             let resp2 = self
+                 .send_with_auth(method, path, &Auth::Bearer, body)
+                 .await?;
+             if resp2.status() == StatusCode::UNAUTHORIZED {
+                 eprintln!("New session token also invalid. Removing it.");
+                 self.cfg.session_token = None;
+                 self.cfg.save()?;
+                 bail!("Authentication failed with new token");
+             }
+             return Ok(resp2);
+         }
+         Ok(resp)
+     }
 
     /// Make a request with an explicit API key token (not from config).
     pub async fn get_with_api_key(&self, path: &str, api_key: &str) -> Result<Response> {
