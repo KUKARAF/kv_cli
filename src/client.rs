@@ -167,6 +167,32 @@ impl Client {
          Ok(resp)
      }
 
+    /// Make a GET/etc request with no authentication headers.
+    pub async fn send_unauthenticated(&self, method: Method, path: &str) -> Result<Response> {
+        let url = format!("{}{}", self.base_url, path);
+        Ok(self
+            .http
+            .request(method, &url)
+            .send()
+            .await
+            .with_context(|| format!("request to {url} failed"))?)
+    }
+
+    /// POST JSON with no authentication headers.
+    pub async fn http_post_unauthenticated(
+        &self,
+        url: &str,
+        body: &impl Serialize,
+    ) -> Result<Response> {
+        Ok(self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("request to {url} failed"))?)
+    }
+
     /// Make a request with an explicit API key token (not from config).
     pub async fn get_with_api_key(&self, path: &str, api_key: &str) -> Result<Response> {
         let url = format!("{}{}", self.base_url, path);

@@ -98,6 +98,12 @@ enum SessionCmd {
     /// Check if the current session token is valid.
     /// Exits 0 if valid, 1 if expired or missing. No output — safe for scripting.
     Check,
+    /// Request a session token via admin approval (shows URL + QR code, polls until approved)
+    Request {
+        /// Optional label shown to the approving admin
+        #[arg(long)]
+        label: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -147,9 +153,14 @@ async fn run() -> Result<()> {
                 commands::keys::revoke(&mut client, &id).await?;
             }
         },
-        Cmd::Session(SessionCmd::Check) => {
-            if !commands::session::check(&client).await {
-                std::process::exit(1);
+        Cmd::Session(session_cmd) => match session_cmd {
+            SessionCmd::Check => {
+                if !commands::session::check(&client).await {
+                    std::process::exit(1);
+                }
+            }
+            SessionCmd::Request { label } => {
+                commands::session_request::request(&mut client, label).await?;
             }
         }
     }
