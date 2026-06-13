@@ -57,12 +57,7 @@ impl Client {
             return false;
         }
         match self.send_with_auth(Method::GET, "/kv", &Auth::Bearer, None::<&()>).await {
-            Ok(resp) if resp.status() == StatusCode::UNAUTHORIZED => {
-                self.cfg.session_token = None;
-                let _ = self.cfg.save();
-                false
-            }
-            Ok(_) => true,
+            Ok(resp) => resp.status() != StatusCode::UNAUTHORIZED,
             Err(_) => false,
         }
     }
@@ -70,7 +65,7 @@ impl Client {
     /// Show the Tailscale-style approval flow: prints URL + QR code, polls until approved.
     /// Saves the resulting session token to config on success.
     pub async fn acquire_session_token(&mut self, label: Option<String>) -> Result<()> {
-        let url = format!("{}/api/session-request/", self.base_url);
+        let url = format!("{}/api/session-request", self.base_url);
         let resp = self
             .http_post_unauthenticated(&url, &SessionRequestBody { label })
             .await?;
@@ -270,8 +265,9 @@ impl Client {
             .await?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
+            // Clear from memory so send_with_auth doesn't retry with the stale token,
+            // but don't save to disk yet — acquire_session_token will save on success.
             self.cfg.session_token = None;
-            self.cfg.save()?;
             self.acquire_session_token(None).await?;
             let resp2 = self
                 .send_with_auth(method, path, &Auth::Bearer, body)
