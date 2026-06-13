@@ -155,7 +155,7 @@ async fn run() -> Result<()> {
         },
         Cmd::Session(session_cmd) => match session_cmd {
             SessionCmd::Check => {
-                if !commands::session::check(&client).await {
+                if !commands::session::check(&mut client).await {
                     std::process::exit(1);
                 }
             }

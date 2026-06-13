@@ -31,12 +31,17 @@ impl Client {
 
     /// Check if the stored session token is valid without prompting.
     /// Returns true if the token exists and the server accepts it.
-    pub async fn is_session_valid(&self) -> bool {
+    pub async fn is_session_valid(&mut self) -> bool {
         if self.cfg.session_token.is_none() {
             return false;
         }
         match self.send_with_auth(Method::GET, "/kv", &Auth::Bearer, None::<&()>).await {
-            Ok(resp) => resp.status() != StatusCode::UNAUTHORIZED,
+            Ok(resp) if resp.status() == StatusCode::UNAUTHORIZED => {
+                self.cfg.session_token = None;
+                let _ = self.cfg.save();
+                false
+            }
+            Ok(_) => true,
             Err(_) => false,
         }
     }
