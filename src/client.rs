@@ -91,7 +91,7 @@ impl Client {
         eprintln!();
 
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(4);
-        tokio::task::spawn_blocking(move || {
+        std::thread::spawn(move || {
             loop {
                 let mut line = String::new();
                 if std::io::stdin().read_line(&mut line).is_err() {
