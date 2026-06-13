@@ -55,16 +55,4 @@ impl Config {
         Ok(self.api_key.clone().unwrap())
     }
 
-    /// Return the stored session_token, prompting and saving if absent.
-    pub fn require_session_token(&mut self) -> Result<String> {
-        if let Some(t) = &self.session_token {
-            return Ok(t.clone());
-        }
-        eprintln!("No session token found. Get one from the admin UI (Copy Session Token button).");
-        let token = rpassword::prompt_password("Session token: ")
-            .context("failed to read session token")?;
-        self.session_token = Some(token.trim().to_string());
-        self.save()?;
-        Ok(self.session_token.clone().unwrap())
-    }
 }

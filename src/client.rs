@@ -1,6 +1,9 @@
 use anyhow::{bail, Context, Result};
+use qrcode::{render::unicode, QrCode};
 use reqwest::{Method, Response, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use tokio::time::interval;
 
 use crate::config::Config;
 
@@ -14,6 +17,24 @@ pub struct Client {
 enum Auth {
     ApiKey,
     Bearer,
+}
+
+#[derive(Serialize)]
+struct SessionRequestBody {
+    label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SessionRequestCreated {
+    id: String,
+    url: String,
+    expires_at: String,
+}
+
+#[derive(Deserialize)]
+struct SessionRequestStatus {
+    status: String,
+    session_token: Option<String>,
 }
 
 impl Client {
@@ -43,6 +64,102 @@ impl Client {
             }
             Ok(_) => true,
             Err(_) => false,
+        }
+    }
+
+    /// Show the Tailscale-style approval flow: prints URL + QR code, polls until approved.
+    /// Saves the resulting session token to config on success.
+    pub async fn acquire_session_token(&mut self, label: Option<String>) -> Result<()> {
+        let url = format!("{}/api/session-request/", self.base_url);
+        let resp = self
+            .http_post_unauthenticated(&url, &SessionRequestBody { label })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            bail!("server returned {status}: {text}");
+        }
+
+        let created: SessionRequestCreated = resp.json().await?;
+
+        eprintln!();
+        eprintln!("  Approval URL:");
+        eprintln!("  {}", created.url);
+        eprintln!("  Expires: {}", created.expires_at);
+        eprintln!();
+
+        print_qr(&created.url);
+
+        eprintln!("  Open the URL or scan the QR code to approve.");
+        eprintln!("  Polling every 5s.  Press  q ↵  to cancel.");
+        eprintln!();
+
+        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(4);
+        tokio::task::spawn_blocking(move || {
+            loop {
+                let mut line = String::new();
+                if std::io::stdin().read_line(&mut line).is_err() {
+                    break;
+                }
+                if stdin_tx.blocking_send(line).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let status_path = format!("/api/session-request/{}/status", created.id);
+        let mut ticker = interval(Duration::from_secs(5));
+        ticker.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let resp = self.send_unauthenticated(Method::GET, &status_path).await?;
+                    let status_code = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+
+                    if status_code == 404 {
+                        bail!("request not found (expired?)");
+                    }
+                    if status_code != 200 {
+                        eprint!(".");
+                        continue;
+                    }
+
+                    let status: SessionRequestStatus = match serde_json::from_str(&body) {
+                        Ok(s) => s,
+                        Err(_) => { eprint!("."); continue; }
+                    };
+
+                    match status.status.as_str() {
+                        "approved" => {
+                            let token = status.session_token
+                                .ok_or_else(|| anyhow::anyhow!("server approved but returned no token"))?;
+                            self.cfg.session_token = Some(token);
+                            self.cfg.save()?;
+                            eprintln!();
+                            eprintln!("  ✅  Session approved and saved to config.");
+                            return Ok(());
+                        }
+                        "rejected" => {
+                            eprintln!();
+                            bail!("request was rejected");
+                        }
+                        "expired" => {
+                            eprintln!();
+                            bail!("request expired without approval");
+                        }
+                        _ => eprint!("."),
+                    }
+                }
+                Some(line) = stdin_rx.recv() => {
+                    match line.trim() {
+                        "q" | "Q" => bail!("cancelled"),
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
@@ -104,73 +221,69 @@ impl Client {
         Ok(resp)
     }
 
-     /// Try with session token without prompting.
-     /// Returns Some(response) if the token exists and the server returns non-401.
-     /// Returns None if no token is stored or the token is expired (401).
-     /// Silently removes the token from config if it's invalid.
-     pub async fn try_bearer_silent(
-         &mut self,
-         method: Method,
-         path: &str,
-         body: Option<&impl Serialize>,
-     ) -> Result<Option<Response>> {
-         if self.cfg.session_token.is_none() {
-             return Ok(None);
-         }
-         let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
-         if resp.status() == StatusCode::UNAUTHORIZED {
-             // Token is invalid — remove it silently for next time
-             self.cfg.session_token = None;
-             let _ = self.cfg.save();
-             Ok(None)
-         } else {
-             Ok(Some(resp))
-         }
-     }
+    /// Try with session token without prompting.
+    /// Returns Some(response) if the token exists and the server returns non-401.
+    /// Returns None if no token is stored or the token is expired (401).
+    /// Silently removes the token from config if it's invalid.
+    pub async fn try_bearer_silent(
+        &mut self,
+        method: Method,
+        path: &str,
+        body: Option<&impl Serialize>,
+    ) -> Result<Option<Response>> {
+        if self.cfg.session_token.is_none() {
+            return Ok(None);
+        }
+        let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            self.cfg.session_token = None;
+            let _ = self.cfg.save();
+            Ok(None)
+        } else {
+            Ok(Some(resp))
+        }
+    }
 
-     pub async fn request_bearer(
-         &mut self,
-         method: Method,
-         path: &str,
-         body: Option<&impl Serialize>,
-     ) -> Result<Response> {
-         if self.silent {
-             if self.cfg.session_token.is_none() {
-                 bail!("no session token configured (--silent mode)");
-             }
-             let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
-             if resp.status() == StatusCode::UNAUTHORIZED {
-                 bail!("session token expired (--silent mode)");
-             }
-             return Ok(resp);
-         }
-         self.cfg.require_session_token()?;
-         let resp = self
-             .send_with_auth(method.clone(), path, &Auth::Bearer, body)
-             .await?;
-         if resp.status() == StatusCode::UNAUTHORIZED {
-             eprintln!("Session token invalid or expired. Removing old token.");
-             // Clear the invalid token from config
-             self.cfg.session_token = None;
-             self.cfg.save()?;
-             eprintln!("Get a new one from the admin UI (Copy Session Token button).");
-             let new_token = rpassword::prompt_password("New session token: ")
-                 .context("failed to read session token")?;
-             self.cfg.session_token = Some(new_token.trim().to_string());
-             self.cfg.save()?;
-             let resp2 = self
-                 .send_with_auth(method, path, &Auth::Bearer, body)
-                 .await?;
-             if resp2.status() == StatusCode::UNAUTHORIZED {
-                 eprintln!("New session token also invalid. Removing it.");
-                 self.cfg.session_token = None;
-                 self.cfg.save()?;
-                 bail!("Authentication failed with new token");
-             }
-             return Ok(resp2);
-         }
-         Ok(resp)
-     }
+    pub async fn request_bearer(
+        &mut self,
+        method: Method,
+        path: &str,
+        body: Option<&impl Serialize>,
+    ) -> Result<Response> {
+        if self.silent {
+            if self.cfg.session_token.is_none() {
+                bail!("no session token configured (--silent mode)");
+            }
+            let resp = self.send_with_auth(method, path, &Auth::Bearer, body).await?;
+            if resp.status() == StatusCode::UNAUTHORIZED {
+                bail!("session token expired (--silent mode)");
+            }
+            return Ok(resp);
+        }
+
+        if self.cfg.session_token.is_none() {
+            self.acquire_session_token(None).await?;
+        }
+
+        let resp = self
+            .send_with_auth(method.clone(), path, &Auth::Bearer, body)
+            .await?;
+
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            self.cfg.session_token = None;
+            self.cfg.save()?;
+            self.acquire_session_token(None).await?;
+            let resp2 = self
+                .send_with_auth(method, path, &Auth::Bearer, body)
+                .await?;
+            if resp2.status() == StatusCode::UNAUTHORIZED {
+                bail!("authentication failed after re-approval");
+            }
+            return Ok(resp2);
+        }
+
+        Ok(resp)
+    }
 
     /// Make a GET/etc request with no authentication headers.
     pub async fn send_unauthenticated(&self, method: Method, path: &str) -> Result<Response> {
@@ -224,5 +337,19 @@ impl Client {
             bail!("server returned {status}: {body}");
         }
         Ok(body)
+    }
+}
+
+fn print_qr(url: &str) {
+    match QrCode::new(url.as_bytes()) {
+        Ok(code) => {
+            let image = code
+                .render::<unicode::Dense1x2>()
+                .dark_color(unicode::Dense1x2::Dark)
+                .light_color(unicode::Dense1x2::Light)
+                .build();
+            eprintln!("{}", image);
+        }
+        Err(_) => eprintln!("  (QR generation failed, use the URL above)"),
     }
 }
