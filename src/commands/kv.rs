@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use tabled::{Table, Tabled};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{interval, Duration};
 
 use crate::client::Client;
@@ -173,19 +174,7 @@ async fn get_with_token(client: &Client, key: &str, api_key: &str) -> Result<()>
         s => bail!("unexpected status {s}"),
     }
 
-    // Spawn a background task that forwards stdin lines on a channel
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(4);
-    tokio::task::spawn_blocking(move || {
-        loop {
-            let mut line = String::new();
-            if std::io::stdin().read_line(&mut line).is_err() {
-                break;
-            }
-            if stdin_tx.blocking_send(line).is_err() {
-                break;
-            }
-        }
-    });
+    let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
 
     // Outer loop — re-enters when user regenerates
     loop {
@@ -209,7 +198,7 @@ async fn get_with_token(client: &Client, key: &str, api_key: &str) -> Result<()>
                         _ => eprint!("."), // still pending
                     }
                 }
-                Some(line) = stdin_rx.recv() => {
+                Ok(Some(line)) = stdin_lines.next_line() => {
                     match line.trim() {
                         "r" | "R" => {
                             eprintln!("Regenerating…");

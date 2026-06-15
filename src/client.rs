@@ -3,6 +3,7 @@ use qrcode::{render::unicode, QrCode};
 use reqwest::{Method, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::interval;
 
 use crate::config::Config;
@@ -90,22 +91,11 @@ impl Client {
         eprintln!("  Polling every 5s.  Press  q ↵  to cancel.");
         eprintln!();
 
-        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(4);
-        std::thread::spawn(move || {
-            loop {
-                let mut line = String::new();
-                if std::io::stdin().read_line(&mut line).is_err() {
-                    break;
-                }
-                if stdin_tx.blocking_send(line).is_err() {
-                    break;
-                }
-            }
-        });
-
         let status_path = format!("/api/session-request/{}/status", created.id);
         let mut ticker = interval(Duration::from_secs(5));
         ticker.tick().await;
+
+        let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
 
         loop {
             tokio::select! {
@@ -148,10 +138,10 @@ impl Client {
                         _ => eprint!("."),
                     }
                 }
-                Some(line) = stdin_rx.recv() => {
+                Ok(Some(line)) = stdin_lines.next_line() => {
                     match line.trim() {
                         "q" | "Q" => bail!("cancelled"),
-                        _ => {}
+                        _ => {},
                     }
                 }
             }
