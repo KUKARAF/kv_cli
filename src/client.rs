@@ -3,7 +3,6 @@ use qrcode::{render::unicode, QrCode};
 use reqwest::{Method, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::interval;
 
 use crate::config::Config;
@@ -88,62 +87,51 @@ impl Client {
         print_qr(&created.url);
 
         eprintln!("  Open the URL or scan the QR code to approve.");
-        eprintln!("  Polling every 5s.  Press  q ↵  to cancel.");
+        eprintln!("  Polling every 5s.  Press  Ctrl+C  to cancel.");
         eprintln!();
 
         let status_path = format!("/api/session-request/{}/status", created.id);
         let mut ticker = interval(Duration::from_secs(5));
         ticker.tick().await;
 
-        let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
-
         loop {
-            tokio::select! {
-                _ = ticker.tick() => {
-                    let resp = self.send_unauthenticated(Method::GET, &status_path).await?;
-                    let status_code = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
+            ticker.tick().await;
+            let resp = self.send_unauthenticated(Method::GET, &status_path).await?;
+            let status_code = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
 
-                    if status_code == 404 {
-                        bail!("request not found (expired?)");
-                    }
-                    if status_code != 200 {
-                        eprint!(".");
-                        continue;
-                    }
+            if status_code == 404 {
+                bail!("request not found (expired?)");
+            }
+            if status_code != 200 {
+                eprint!(".");
+                continue;
+            }
 
-                    let status: SessionRequestStatus = match serde_json::from_str(&body) {
-                        Ok(s) => s,
-                        Err(_) => { eprint!("."); continue; }
-                    };
+            let status: SessionRequestStatus = match serde_json::from_str(&body) {
+                Ok(s) => s,
+                Err(_) => { eprint!("."); continue; }
+            };
 
-                    match status.status.as_str() {
-                        "approved" => {
-                            let token = status.session_token
-                                .ok_or_else(|| anyhow::anyhow!("server approved but returned no token"))?;
-                            self.cfg.session_token = Some(token);
-                            self.cfg.save()?;
-                            eprintln!();
-                            eprintln!("  ✅  Session approved and saved to config.");
-                            return Ok(());
-                        }
-                        "rejected" => {
-                            eprintln!();
-                            bail!("request was rejected");
-                        }
-                        "expired" => {
-                            eprintln!();
-                            bail!("request expired without approval");
-                        }
-                        _ => eprint!("."),
-                    }
+            match status.status.as_str() {
+                "approved" => {
+                    let token = status.session_token
+                        .ok_or_else(|| anyhow::anyhow!("server approved but returned no token"))?;
+                    self.cfg.session_token = Some(token);
+                    self.cfg.save()?;
+                    eprintln!();
+                    eprintln!("  ✅  Session approved and saved to config.");
+                    return Ok(());
                 }
-                Ok(Some(line)) = stdin_lines.next_line() => {
-                    match line.trim() {
-                        "q" | "Q" => bail!("cancelled"),
-                        _ => {},
-                    }
+                "rejected" => {
+                    eprintln!();
+                    bail!("request was rejected");
                 }
+                "expired" => {
+                    eprintln!();
+                    bail!("request expired without approval");
+                }
+                _ => eprint!("."),
             }
         }
     }

@@ -2,7 +2,6 @@ use anyhow::{bail, Result};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use tabled::{Table, Tabled};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{interval, Duration};
 
 use crate::client::Client;
@@ -145,9 +144,7 @@ fn print_emojis(emojis: &str) {
     eprintln!("  │                                  │");
     eprintln!("  └─────────────────────────────────┘");
     eprintln!();
-    eprintln!("  Polling for approval every 5s.");
-    eprintln!("  Press  r ↵  to regenerate emojis");
-    eprintln!("  Press  q ↵  to quit");
+    eprintln!("  Polling for approval every 5s.  Press  Ctrl+C  to quit.");
     eprintln!();
 }
 
@@ -174,41 +171,23 @@ async fn get_with_token(client: &Client, key: &str, api_key: &str) -> Result<()>
         s => bail!("unexpected status {s}"),
     }
 
-    let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
+    let emojis = call_request_access(client, api_key).await?;
+    print_emojis(&emojis);
 
-    // Outer loop — re-enters when user regenerates
+    let mut ticker = interval(Duration::from_secs(5));
+    ticker.tick().await; // discard immediate first tick
+
     loop {
-        let emojis = call_request_access(client, api_key).await?;
-        print_emojis(&emojis);
-
-        let mut ticker = interval(Duration::from_secs(5));
-        ticker.tick().await; // discard immediate first tick
-
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {
-                    let resp = client.get_with_api_key(&path, api_key).await?;
-                    match resp.status().as_u16() {
-                        200 => {
-                            eprintln!("✅  Approved!");
-                            print!("{}", resp.text().await.unwrap_or_default());
-                            return Ok(());
-                        }
-                        401 => bail!("link expired"),
-                        _ => eprint!("."), // still pending
-                    }
-                }
-                Ok(Some(line)) = stdin_lines.next_line() => {
-                    match line.trim() {
-                        "r" | "R" => {
-                            eprintln!("Regenerating…");
-                            break; // break inner → outer loop regenerates
-                        }
-                        "q" | "Q" => bail!("cancelled"),
-                        _ => {}
-                    }
-                }
+        ticker.tick().await;
+        let resp = client.get_with_api_key(&path, api_key).await?;
+        match resp.status().as_u16() {
+            200 => {
+                eprintln!("✅  Approved!");
+                print!("{}", resp.text().await.unwrap_or_default());
+                return Ok(());
             }
+            401 => bail!("link expired"),
+            _ => eprint!("."),
         }
     }
 }
