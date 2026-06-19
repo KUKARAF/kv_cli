@@ -1,0 +1,163 @@
+name: Security Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  security-review:
+    name: Security audit (Claude)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          echo "lines=$(wc -l < /tmp/pr.diff)" >> "$GITHUB_OUTPUT"
+
+      - name: Run security audit
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, sys, json, subprocess, textwrap
+          import urllib.request, urllib.error
+
+          diff = open("/tmp/pr.diff").read()
+          if not diff.strip():
+              print("Empty diff — nothing to review.")
+              sys.exit(0)
+
+          # Truncate very large diffs to avoid token limits
+          MAX_DIFF_CHARS = 60_000
+          truncated = False
+          if len(diff) > MAX_DIFF_CHARS:
+              diff = diff[:MAX_DIFF_CHARS]
+              truncated = True
+
+          system_prompt = textwrap.dedent("""
+          You are a senior security engineer performing an automated code review on a pull request diff.
+
+          Your job is to audit the changes for security vulnerabilities following this methodology:
+
+          ## Phase 1: Attack Surface
+          Identify what the changed code does and what it exposes: auth model, external integrations,
+          user-controlled input entry points, secrets handling.
+
+          ## Phase 2: Vulnerability Sweep
+          Check for:
+          - RCE primitives: eval, exec, subprocess with user input, shell=True
+          - Injection: SQL/NoSQL string interpolation, SSTI, XSS (innerHTML, dangerouslySetInnerHTML)
+          - Auth issues: hardcoded secrets, weak token generation, missing auth checks, JWT algorithm misconfiguration
+          - Secrets exposure: credentials in code, logs, or error messages; secrets sent to LLM providers
+          - Path traversal: user input in file paths, open(), readFile, path.join without validation
+          - Deserialization: pickle, yaml.load, marshal
+          - CORS misconfiguration: fallback to * when env var is unset
+          - Webhook signature bypass: `if secret:` fallbacks
+          - OAuth redirect_uri not whitelisted
+          - Missing rate limiting on auth endpoints
+          - Supply chain: new dependencies added — flag if unfamiliar or pinned to a vague range
+
+          ## Phase 3: Report
+
+          Structure your findings as:
+
+          ### 🔴 CRITICAL
+          (RCE, secret exposure, auth bypass, token exfiltration)
+
+          ### 🟠 HIGH
+          (Injection, serious misconfiguration, missing security headers on auth routes)
+
+          ### 🟡 MEDIUM
+          (CSRF, weak crypto, missing rate limit, CORS issues)
+
+          ### 🟢 LOW / INFO
+          (Minor info disclosure, style issues, dependency notes)
+
+          ### ✅ Looks Good
+          (What's done right — don't leave this empty)
+
+          For each finding include:
+          - File path and line number from the diff
+          - The vulnerable code snippet
+          - Exploitation chain (Vulnerability → Attacker Action → Impact)
+          - Specific fix
+
+          If the diff is clean, say so clearly with a short explanation.
+
+          Important rules:
+          - Only report findings visible in the diff — do not speculate about code not shown.
+          - Do not report false positives. A `password` variable that holds a bcrypt hash is not a finding.
+          - "No direct eval" doesn't mean no RCE — trace chains through external systems.
+          - Be concise. No padding. No repeating the diff back.
+          """).strip()
+
+          user_message = f"Review this pull request diff for security issues:\n\n```diff\n{diff}\n```"
+          if truncated:
+              user_message += "\n\n⚠️ Diff was truncated to 60,000 characters — only the first portion was reviewed."
+
+          payload = json.dumps({
+              "model": "claude-sonnet-4-6",
+              "max_tokens": 4096,
+              "system": system_prompt,
+              "messages": [{"role": "user", "content": user_message}]
+          }).encode()
+
+          req = urllib.request.Request(
+              "https://api.anthropic.com/v1/messages",
+              data=payload,
+              headers={
+                  "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+                  "anthropic-version": "2023-06-01",
+                  "content-type": "application/json",
+              }
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=120) as resp:
+                  result = json.load(resp)
+          except urllib.error.HTTPError as e:
+              print(f"Anthropic API error {e.code}: {e.read().decode()}", file=sys.stderr)
+              sys.exit(1)
+
+          review_body = result["content"][0]["text"]
+
+          header = (
+              "## Security Code Review\n\n"
+              f"> Automated review powered by [security-code-audit](https://github.com/KUKARAF/home-manager) skill · model: `claude-sonnet-4-6`\n\n"
+          )
+          if truncated:
+              header += "> ⚠️ Diff exceeded 60,000 characters — only the first portion was reviewed.\n\n"
+
+          comment_body = header + review_body
+
+          pr_number = os.environ["PR_NUMBER"]
+          repo = os.environ["REPO"]
+          gh_token = os.environ["GH_TOKEN"]
+
+          comment_payload = json.dumps({"body": comment_body}).encode()
+          comment_req = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+              data=comment_payload,
+              headers={
+                  "Authorization": f"Bearer {gh_token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "Content-Type": "application/json",
+              }
+          )
+          with urllib.request.urlopen(comment_req) as resp:
+              posted = json.load(resp)
+          print(f"Posted review comment: {posted['html_url']}")
+          PYEOF
