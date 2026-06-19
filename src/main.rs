@@ -70,6 +70,9 @@ enum Cmd {
     /// Session management
     #[command(subcommand)]
     Session(SessionCmd),
+    /// Manage device registration
+    #[command(subcommand)]
+    Device(DeviceCmd),
 }
 
 #[derive(Subcommand)]
@@ -89,6 +92,21 @@ enum KeysCmd {
     },
     /// Revoke an API key by ID
     Revoke {
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeviceCmd {
+    /// Register this CLI as a device (generates key pair if needed)
+    Register {
+        /// Device name (e.g. "work-laptop")
+        name: String,
+    },
+    /// List all registered devices
+    List,
+    /// Unregister a device by ID
+    Unregister {
         id: String,
     },
 }
@@ -162,7 +180,18 @@ async fn run() -> Result<()> {
             SessionCmd::Request { label } => {
                 commands::session_request::request(&mut client, label).await?;
             }
-        }
+        },
+        Cmd::Device(device_cmd) => match device_cmd {
+            DeviceCmd::Register { name } => {
+                commands::device::register(&mut client, name).await?;
+            }
+            DeviceCmd::List => {
+                commands::device::list(&mut client).await?;
+            }
+            DeviceCmd::Unregister { id } => {
+                commands::device::unregister(&mut client, id).await?;
+            }
+        },
     }
 
     Ok(())
