@@ -109,6 +109,8 @@ enum DeviceCmd {
     Unregister {
         id: String,
     },
+    /// Print this device's public key (base64 SPKI DER)
+    Pubkey,
 }
 
 #[derive(Subcommand)]
@@ -190,6 +192,9 @@ async fn run() -> Result<()> {
             }
             DeviceCmd::Unregister { id } => {
                 commands::device::unregister(&mut client, id).await?;
+            }
+            DeviceCmd::Pubkey => {
+                commands::device::pubkey()?;
             }
         },
     }

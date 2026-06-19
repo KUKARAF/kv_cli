@@ -125,3 +125,21 @@ pub async fn unregister(client: &mut Client, id: String) -> Result<()> {
     eprintln!("Unregistered device {id}");
     Ok(())
 }
+
+/// Print the local device's public key (SPKI DER, base64) — useful for
+/// verifying the key stored server-side matches the local device.key.
+pub fn pubkey() -> Result<()> {
+    let path = key_path()?;
+    if !path.exists() {
+        anyhow::bail!(
+            "no device key found at {} — run `kv device register` first",
+            path.display()
+        );
+    }
+    let pem = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read key from {}", path.display()))?;
+    let key = SigningKey::from_pkcs8_pem(&pem)
+        .map_err(|e| anyhow::anyhow!("failed to parse device key: {e}"))?;
+    println!("{}", public_key_b64(&key)?);
+    Ok(())
+}
