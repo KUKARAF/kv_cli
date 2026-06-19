@@ -7,6 +7,7 @@ pub struct Config {
     pub base_url: Option<String>,
     pub session_token: Option<String>,
     pub api_key: Option<String>,
+    pub device_id: Option<String>,
 }
 
 impl Config {
