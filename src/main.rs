@@ -4,6 +4,7 @@ mod config;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 use client::Client;
 use config::Config;
@@ -102,12 +103,21 @@ enum DeviceCmd {
     Register {
         /// Device name (e.g. "work-laptop")
         name: String,
+        /// Store key as a plaintext file instead of OS keyring (for headless/CI use)
+        #[arg(long, value_name = "PATH")]
+        key_file: Option<PathBuf>,
     },
     /// List all registered devices
     List,
     /// Unregister a device by ID
     Unregister {
         id: String,
+    },
+    /// Print this device's public key (base64 SPKI DER)
+    Pubkey {
+        /// Load key from file instead of OS keyring
+        #[arg(long, value_name = "PATH")]
+        key_file: Option<PathBuf>,
     },
 }
 
@@ -182,14 +192,17 @@ async fn run() -> Result<()> {
             }
         },
         Cmd::Device(device_cmd) => match device_cmd {
-            DeviceCmd::Register { name } => {
-                commands::device::register(&mut client, name).await?;
+            DeviceCmd::Register { name, key_file } => {
+                commands::device::register(&mut client, name, key_file).await?;
             }
             DeviceCmd::List => {
                 commands::device::list(&mut client).await?;
             }
             DeviceCmd::Unregister { id } => {
                 commands::device::unregister(&mut client, id).await?;
+            }
+            DeviceCmd::Pubkey { key_file } => {
+                commands::device::pubkey(key_file)?;
             }
         },
     }
