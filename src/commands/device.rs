@@ -5,55 +5,24 @@ use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEndin
 use rand_core::OsRng;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tabled::{Table, Tabled};
 
 use crate::client::Client;
 
-const KEYRING_SERVICE: &str = "kv";
-const KEYRING_ACCOUNT: &str = "device-key";
-
 // ── Keypair management ────────────────────────────────────────────────────────
 
-/// Load (or generate) the device signing key.
-///
-/// `key_file = Some(path)` → plaintext file fallback (headless/CI, prints warning).
-/// `key_file = None`       → OS keyring (GNOME Keyring / macOS Keychain / DPAPI).
-fn load_or_create_key(key_file: Option<&Path>) -> Result<SigningKey> {
-    if let Some(path) = key_file {
-        eprintln!("warning: using unencrypted key file at {}", path.display());
-        return load_or_create_key_file(path);
-    }
-
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| anyhow::anyhow!("keyring unavailable: {e}\nHint: pass --key-file for headless environments"))?;
-
-    match entry.get_password() {
-        Ok(b64) => {
-            let der = B64.decode(b64.trim()).context("failed to decode key from keyring")?;
-            SigningKey::from_pkcs8_der(&der)
-                .map_err(|e| anyhow::anyhow!("failed to parse key from keyring: {e}"))
-        }
-        Err(keyring::Error::NoEntry) => {
-            let key = SigningKey::random(&mut OsRng);
-            let der = key
-                .to_pkcs8_der()
-                .map_err(|e| anyhow::anyhow!("failed to encode key: {e}"))?;
-            entry
-                .set_password(&B64.encode(der.as_bytes()))
-                .map_err(|e| anyhow::anyhow!("failed to save key to keyring: {e}"))?;
-            eprintln!("Device key saved to OS keyring.");
-            Ok(key)
-        }
-        Err(e) => Err(anyhow::anyhow!(
-            "keyring error: {e}\nHint: pass --key-file for headless environments"
-        )),
-    }
+fn key_path() -> Result<PathBuf> {
+    let dir = dirs::config_dir()
+        .context("could not determine config directory")?
+        .join("kv");
+    Ok(dir.join("device.key"))
 }
 
-fn load_or_create_key_file(path: &Path) -> Result<SigningKey> {
+fn load_or_create_key() -> Result<SigningKey> {
+    let path = key_path()?;
     if path.exists() {
-        let pem = std::fs::read_to_string(path)
+        let pem = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read key from {}", path.display()))?;
         return SigningKey::from_pkcs8_pem(&pem)
             .map_err(|e| anyhow::anyhow!("failed to parse device key: {e}"));
@@ -62,14 +31,14 @@ fn load_or_create_key_file(path: &Path) -> Result<SigningKey> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    key.write_pkcs8_pem_file(path, LineEnding::LF)
+    key.write_pkcs8_pem_file(&path, LineEnding::LF)
         .map_err(|e| anyhow::anyhow!("failed to write device key: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
-    eprintln!("Device key written to {}", path.display());
+    eprintln!("Generated new device key at {}", path.display());
     Ok(key)
 }
 
@@ -109,9 +78,8 @@ fn opt_str(v: &Option<String>) -> String {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-pub async fn register(client: &mut Client, name: String, key_file: Option<PathBuf>) -> Result<()> {
-    let key_file_ref = key_file.as_deref();
-    let key = tokio::task::block_in_place(|| load_or_create_key(key_file_ref))?;
+pub async fn register(client: &mut Client, name: String) -> Result<()> {
+    let key = load_or_create_key()?;
     let public_key = public_key_b64(&key)?;
 
     let body = RegisterRequest { name: name.clone(), public_key };
@@ -157,12 +125,3 @@ pub async fn unregister(client: &mut Client, id: String) -> Result<()> {
     eprintln!("Unregistered device {id}");
     Ok(())
 }
-
-/// Print this device's public key (base64 SPKI DER).
-pub fn pubkey(key_file: Option<PathBuf>) -> Result<()> {
-    let key_file_ref = key_file.as_deref();
-    let key = load_or_create_key(key_file_ref)?;
-    println!("{}", public_key_b64(&key)?);
-    Ok(())
-}
-
