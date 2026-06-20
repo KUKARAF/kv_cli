@@ -22,6 +22,7 @@ enum Auth {
 #[derive(Serialize)]
 struct SessionRequestBody {
     label: Option<String>,
+    requested_duration_hours: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -64,10 +65,10 @@ impl Client {
 
     /// Show the Tailscale-style approval flow: prints URL + QR code, polls until approved.
     /// Saves the resulting session token to config on success.
-    pub async fn acquire_session_token(&mut self, label: Option<String>) -> Result<()> {
+    pub async fn acquire_session_token(&mut self, label: Option<String>, duration_hours: Option<i64>) -> Result<()> {
         let url = format!("{}/api/session-request", self.base_url);
         let resp = self
-            .http_post_unauthenticated(&url, &SessionRequestBody { label })
+            .http_post_unauthenticated(&url, &SessionRequestBody { label, requested_duration_hours: duration_hours })
             .await?;
 
         if !resp.status().is_success() {
@@ -235,7 +236,7 @@ impl Client {
         }
 
         if self.cfg.session_token.is_none() {
-            self.acquire_session_token(None).await?;
+            self.acquire_session_token(None, None).await?;
         }
 
         let resp = self
@@ -246,7 +247,7 @@ impl Client {
             // Clear from memory so send_with_auth doesn't retry with the stale token,
             // but don't save to disk yet — acquire_session_token will save on success.
             self.cfg.session_token = None;
-            self.acquire_session_token(None).await?;
+            self.acquire_session_token(None, None).await?;
             let resp2 = self
                 .send_with_auth(method, path, &Auth::Bearer, body)
                 .await?;

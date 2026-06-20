@@ -121,6 +121,9 @@ enum SessionCmd {
         /// Optional label shown to the approving admin
         #[arg(long)]
         label: Option<String>,
+        /// Requested session duration, e.g. 24h, 7d, 30d, 90d, 365d. Admin can override.
+        #[arg(long)]
+        duration: Option<String>,
     },
 }
 
@@ -177,8 +180,8 @@ async fn run() -> Result<()> {
                     std::process::exit(1);
                 }
             }
-            SessionCmd::Request { label } => {
-                commands::session_request::request(&mut client, label).await?;
+            SessionCmd::Request { label, duration } => {
+                commands::session_request::request(&mut client, label, duration).await?;
             }
         },
         Cmd::Device(device_cmd) => match device_cmd {
