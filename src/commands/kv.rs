@@ -9,6 +9,33 @@ use crate::client::Client;
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
+struct DeviceKvWriteRequest {
+    key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    nonce: String,
+    ciphertext: String,
+    aad: String,
+    recipients: Vec<DeviceKvWriteRecipient>,
+}
+
+#[derive(Serialize)]
+struct DeviceKvWriteRecipient {
+    device_id: String,
+    key_type: String,
+    ephemeral_pub: String,
+    dek_nonce: String,
+    encrypted_dek: String,
+}
+
+#[derive(Deserialize)]
+struct DeviceListEntry {
+    id: String,
+    key_type: String,
+    public_key: String,
+}
+
+#[derive(Serialize)]
 struct KvUpsertRequest {
     value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,7 +298,11 @@ pub async fn set(
     ttl_hours: Option<f64>,
     sliding: bool,
     open: bool,
+    device: bool,
 ) -> Result<()> {
+    if device {
+        return set_device_encrypted(client, key, value.as_bytes(), scope).await;
+    }
     if let Some(ref sc) = scope {
         let body = AdminKvWriteRequest {
             key: key.to_string(),
@@ -298,6 +329,57 @@ pub async fn set(
             .await?;
         Client::expect_success(resp).await?;
     }
+    Ok(())
+}
+
+async fn set_device_encrypted(
+    client: &mut Client,
+    key: &str,
+    plaintext: &[u8],
+    scope: Option<String>,
+) -> Result<()> {
+    let resp = client
+        .request_bearer(Method::GET, "/api/admin/devices", None::<&()>)
+        .await?;
+    let body = Client::expect_success(resp).await?;
+    let devices: Vec<DeviceListEntry> =
+        serde_json::from_str(&body).context("failed to parse devices list")?;
+
+    if devices.is_empty() {
+        anyhow::bail!("no registered devices — register at least one device first");
+    }
+
+    let device_tuples: Vec<(String, String, String)> = devices
+        .iter()
+        .map(|d| (d.id.clone(), d.key_type.clone(), d.public_key.clone()))
+        .collect();
+
+    let payload = crate::crypto::encrypt_for_devices(key, plaintext, &device_tuples)?;
+
+    let body = DeviceKvWriteRequest {
+        key: key.to_string(),
+        scope,
+        nonce: payload.nonce,
+        ciphertext: payload.ciphertext,
+        aad: payload.aad,
+        recipients: payload
+            .recipients
+            .into_iter()
+            .map(|r| DeviceKvWriteRecipient {
+                device_id: r.device_id,
+                key_type: r.key_type,
+                ephemeral_pub: r.ephemeral_pub,
+                dek_nonce: r.dek_nonce,
+                encrypted_dek: r.encrypted_dek,
+            })
+            .collect(),
+    };
+
+    let resp = client
+        .request_bearer(Method::POST, "/api/admin/kv/device", Some(&body))
+        .await?;
+    Client::expect_success(resp).await?;
+    eprintln!("set {key} (device-encrypted, {} recipient(s))", device_tuples.len());
     Ok(())
 }
 

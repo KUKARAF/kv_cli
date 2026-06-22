@@ -49,6 +49,9 @@ enum Cmd {
         /// Allow open (unauthenticated) read access
         #[arg(long)]
         open: bool,
+        /// Encrypt for all registered devices
+        #[arg(long)]
+        device: bool,
     },
     /// List KV entries
     List {
@@ -145,8 +148,8 @@ async fn run() -> Result<()> {
         Cmd::Get { key, token } => {
             commands::kv::get(&mut client, &key, token).await?;
         }
-        Cmd::Set { key, value, scope, ttl, sliding, open } => {
-            commands::kv::set(&mut client, &key, value, scope, ttl, sliding, open).await?;
+        Cmd::Set { key, value, scope, ttl, sliding, open, device } => {
+            commands::kv::set(&mut client, &key, value, scope, ttl, sliding, open, device).await?;
         }
         Cmd::List { prefix } => {
             commands::kv::list(&mut client, prefix).await?;
