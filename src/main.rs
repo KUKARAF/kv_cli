@@ -1,6 +1,7 @@
 mod client;
 mod commands;
 mod config;
+mod crypto;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

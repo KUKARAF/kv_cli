@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use tabled::{Table, Tabled};
@@ -27,6 +27,23 @@ struct AdminKvWriteRequest {
     ttl_hours: Option<f64>,
     ttl_sliding: bool,
     open_access: bool,
+}
+
+// ── Device-encrypted KV response ─────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct DeviceKvResponse {
+    nonce: String,
+    ciphertext: String,
+    aad: String,
+    recipient: DeviceKvRecipient,
+}
+
+#[derive(Deserialize)]
+struct DeviceKvRecipient {
+    ephemeral_pub: String,
+    dek_nonce: String,
+    encrypted_dek: String,
 }
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -66,60 +83,114 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
         return get_with_token(client, key, &api_key).await;
     }
 
-     if let Some(api_key) = client.cfg.api_key.clone() {
-         // Config API key: try it first; fall back to session token on scope error
-         let resp = client.get_with_api_key(&path, &api_key).await?;
-         match resp.status().as_u16() {
-             200 => {
-                 print!("{}", resp.text().await.unwrap_or_default());
-                 return Ok(());
-             }
-             401 | 403 => {
-                 let status = resp.status().as_u16();
-                 let body: serde_json::Value =
-                     serde_json::from_str(&resp.text().await.unwrap_or_default())
-                         .unwrap_or_default();
-                 if body["error"].as_str() == Some("pending approval") {
-                     return get_with_token(client, key, &api_key).await;
-                 }
-                 // Key expired/invalid or insufficient scope — escalate to session token
-                 if status == 401 {
-                     eprintln!("API key invalid or expired. Removing old key.");
-                     client.cfg.api_key = None;
-                     let _ = client.cfg.save();
-                 }
-                 if client.silent {
-                     if status == 401 {
-                         bail!("API key expired or invalid (run `kv add-api-token` to update it)");
-                     } else {
-                         bail!("API key has insufficient scope (--silent prevents session token fallback)");
-                     }
-                 }
-                 let had_session_token = client.cfg.session_token.is_some();
-                 // Try existing session token silently first
-                 if let Some(resp) = client.try_bearer_silent(Method::GET, &path, None::<&()>).await? {
-                     let body = Client::expect_success(resp).await?;
-                     print!("{body}");
-                     return Ok(());
-                 }
-                 if had_session_token && status == 403 {
-                     // Session token expired AND key is valid (scope error) — use approval flow
-                     return get_with_token(client, key, &api_key).await;
-                 }
-                 // No usable session token: prompt for one
-                 let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
-                 let body = Client::expect_success(resp).await?;
-                 print!("{body}");
-                 return Ok(());
-             }
-             s => bail!("unexpected status {s}"),
-         }
-     }
+    if let Some(api_key) = client.cfg.api_key.clone() {
+        // Config API key: try it first; fall back to session token on scope error
+        let resp = client.get_with_api_key(&path, &api_key).await?;
+        match resp.status().as_u16() {
+            200 => {
+                print!("{}", resp.text().await.unwrap_or_default());
+                return Ok(());
+            }
+            401 | 403 => {
+                let status = resp.status().as_u16();
+                let body: serde_json::Value =
+                    serde_json::from_str(&resp.text().await.unwrap_or_default())
+                        .unwrap_or_default();
+                let err = body["error"].as_str().unwrap_or("");
+                if err == "pending approval" {
+                    return get_with_token(client, key, &api_key).await;
+                }
+                if err.starts_with("device-encrypted") {
+                    return fetch_and_decrypt(client, key).await;
+                }
+                // Key expired/invalid or insufficient scope — escalate to session token
+                if status == 401 {
+                    eprintln!("API key invalid or expired. Removing old key.");
+                    client.cfg.api_key = None;
+                    let _ = client.cfg.save();
+                }
+                if client.silent {
+                    if status == 401 {
+                        bail!("API key expired or invalid (run `kv add-api-token` to update it)");
+                    } else {
+                        bail!("API key has insufficient scope (--silent prevents session token fallback)");
+                    }
+                }
+                let had_session_token = client.cfg.session_token.is_some();
+                // Try existing session token silently first
+                if let Some(resp) = client.try_bearer_silent(Method::GET, &path, None::<&()>).await? {
+                    let status = resp.status();
+                    let body_text = resp.text().await.unwrap_or_default();
+                    if status.as_u16() == 403 {
+                        let b: serde_json::Value =
+                            serde_json::from_str(&body_text).unwrap_or_default();
+                        if b["error"].as_str().unwrap_or("").starts_with("device-encrypted") {
+                            return fetch_and_decrypt(client, key).await;
+                        }
+                    }
+                    if !status.is_success() {
+                        bail!("server returned {status}: {body_text}");
+                    }
+                    print!("{body_text}");
+                    return Ok(());
+                }
+                if had_session_token && status == 403 {
+                    // Session token expired AND key is valid (scope error) — use approval flow
+                    return get_with_token(client, key, &api_key).await;
+                }
+                // No usable session token: prompt for one
+                let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+                let body = Client::expect_success(resp).await?;
+                print!("{body}");
+                return Ok(());
+            }
+            s => bail!("unexpected status {s}"),
+        }
+    }
 
     // No API key in config: use session token directly
     let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+    if resp.status().as_u16() == 403 {
+        let body: serde_json::Value =
+            serde_json::from_str(&resp.text().await.unwrap_or_default())
+                .unwrap_or_default();
+        if body["error"].as_str().unwrap_or("").starts_with("device-encrypted") {
+            return fetch_and_decrypt(client, key).await;
+        }
+        bail!("{}", body["error"].as_str().unwrap_or("forbidden"));
+    }
     let body = Client::expect_success(resp).await?;
     print!("{body}");
+    Ok(())
+}
+
+async fn fetch_and_decrypt(client: &mut Client, key: &str) -> Result<()> {
+    let device_id = client
+        .cfg
+        .device_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("key is device-encrypted; run `kv device register` first"))?;
+
+    let priv_key_b64 = crate::commands::device::load_private_key_b64()?;
+
+    let path = format!("/api/admin/devices/{}/kv/{}", device_id, urlencoding(key));
+    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+    let text = Client::expect_success(resp).await?;
+
+    let payload: DeviceKvResponse =
+        serde_json::from_str(&text).context("failed to parse device KV response")?;
+
+    let plaintext = crate::crypto::decrypt_device_kv(
+        &priv_key_b64,
+        &payload.recipient.ephemeral_pub,
+        &payload.recipient.dek_nonce,
+        &payload.recipient.encrypted_dek,
+        &payload.nonce,
+        &payload.ciphertext,
+        &payload.aad,
+    )?;
+
+    print!("{}", String::from_utf8_lossy(&plaintext));
     Ok(())
 }
 

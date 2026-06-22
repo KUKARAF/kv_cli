@@ -1,12 +1,11 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use p256::ecdsa::SigningKey;
-use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
 use rand_core::OsRng;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tabled::{Table, Tabled};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::client::Client;
 
@@ -19,35 +18,37 @@ fn key_path() -> Result<PathBuf> {
     Ok(dir.join("device.key"))
 }
 
-fn load_or_create_key() -> Result<SigningKey> {
+fn load_or_create_key() -> Result<StaticSecret> {
     let path = key_path()?;
     if path.exists() {
-        let pem = std::fs::read_to_string(&path)
+        let b64 = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read key from {}", path.display()))?;
-        return SigningKey::from_pkcs8_pem(&pem)
-            .map_err(|e| anyhow::anyhow!("failed to parse device key: {e}"));
+        let bytes: [u8; 32] = B64
+            .decode(b64.trim())
+            .context("device.key is not valid base64 — delete it and re-register")?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("device.key has wrong length — delete it and re-register"))?;
+        return Ok(StaticSecret::from(bytes));
     }
-    let key = SigningKey::random(&mut OsRng);
+    let secret = StaticSecret::random_from_rng(OsRng);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    key.write_pkcs8_pem_file(&path, LineEnding::LF)
-        .map_err(|e| anyhow::anyhow!("failed to write device key: {e}"))?;
+    std::fs::write(&path, B64.encode(secret.as_bytes()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     eprintln!("Generated new device key at {}", path.display());
-    Ok(key)
+    Ok(secret)
 }
 
-fn public_key_b64(key: &SigningKey) -> Result<String> {
-    let der = key
-        .verifying_key()
-        .to_public_key_der()
-        .map_err(|e| anyhow::anyhow!("failed to encode public key: {e}"))?;
-    Ok(B64.encode(der.as_bytes()))
+pub fn load_private_key_b64() -> Result<String> {
+    let path = key_path()?;
+    std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read device key from {}", path.display()))
+        .map(|s| s.trim().to_string())
 }
 
 // ── API types ─────────────────────────────────────────────────────────────────
@@ -56,6 +57,7 @@ fn public_key_b64(key: &SigningKey) -> Result<String> {
 struct RegisterRequest {
     name: String,
     public_key: String,
+    key_type: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -79,10 +81,10 @@ fn opt_str(v: &Option<String>) -> String {
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 pub async fn register(client: &mut Client, name: String) -> Result<()> {
-    let key = load_or_create_key()?;
-    let public_key = public_key_b64(&key)?;
+    let secret = load_or_create_key()?;
+    let public_key = B64.encode(PublicKey::from(&secret).as_bytes());
 
-    let body = RegisterRequest { name: name.clone(), public_key };
+    let body = RegisterRequest { name: name.clone(), public_key, key_type: "x25519" };
     let resp = client
         .request_bearer(Method::POST, "/api/devices", Some(&body))
         .await?;
