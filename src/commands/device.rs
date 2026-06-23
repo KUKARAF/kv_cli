@@ -114,7 +114,28 @@ pub async fn list(client: &mut Client) -> Result<()> {
     Ok(())
 }
 
-pub async fn unregister(client: &mut Client, id: String) -> Result<()> {
+pub async fn unregister(client: &mut Client, id: Option<String>) -> Result<()> {
+    let id = match id {
+        Some(id) => id,
+        None => {
+            let resp = client
+                .request_bearer(Method::GET, "/api/admin/devices", None::<&()>)
+                .await?;
+            let body = Client::expect_success(resp).await?;
+            let devices: Vec<DeviceRow> =
+                serde_json::from_str(&body).context("failed to parse devices list")?;
+            if devices.is_empty() {
+                anyhow::bail!("no registered devices");
+            }
+            let lines: Vec<String> = devices
+                .iter()
+                .map(|d| format!("{:<30}  registered: {}", d.name, d.created_at))
+                .collect();
+            let selected = crate::fzf::select(&lines, false, "Select device to unregister > ")?;
+            devices[selected[0]].id.clone()
+        }
+    };
+
     let path = format!("/api/admin/devices/{id}");
     let resp = client
         .request_bearer(Method::DELETE, &path, None::<&()>)

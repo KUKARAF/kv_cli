@@ -31,6 +31,7 @@ struct DeviceKvWriteRecipient {
 #[derive(Deserialize)]
 struct DeviceListEntry {
     id: String,
+    name: String,
     key_type: String,
     public_key: String,
 }
@@ -349,9 +350,15 @@ async fn set_device_encrypted(
         anyhow::bail!("no registered devices — register at least one device first");
     }
 
-    let device_tuples: Vec<(String, String, String)> = devices
+    let lines: Vec<String> = devices
         .iter()
-        .map(|d| (d.id.clone(), d.key_type.clone(), d.public_key.clone()))
+        .map(|d| format!("{:<30}  [{}]", d.name, d.key_type))
+        .collect();
+    let selected = crate::fzf::select(&lines, true, "Encrypt for devices (TAB to toggle) > ")?;
+
+    let device_tuples: Vec<(String, String, String)> = selected
+        .iter()
+        .map(|&i| (devices[i].id.clone(), devices[i].key_type.clone(), devices[i].public_key.clone()))
         .collect();
 
     let payload = crate::crypto::encrypt_for_devices(key, plaintext, &device_tuples)?;
@@ -379,7 +386,8 @@ async fn set_device_encrypted(
         .request_bearer(Method::POST, "/api/admin/kv/device", Some(&body))
         .await?;
     Client::expect_success(resp).await?;
-    eprintln!("set {key} (device-encrypted, {} recipient(s))", device_tuples.len());
+    let n = device_tuples.len();
+    eprintln!("set {key} (device-encrypted, {n} recipient(s))");
     Ok(())
 }
 

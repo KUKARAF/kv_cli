@@ -2,6 +2,7 @@ mod client;
 mod commands;
 mod config;
 mod crypto;
+mod fzf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -109,9 +110,9 @@ enum DeviceCmd {
     },
     /// List all registered devices
     List,
-    /// Unregister a device by ID
+    /// Unregister a device (launches fzf picker if no ID given)
     Unregister {
-        id: String,
+        id: Option<String>,
     },
 }
 
