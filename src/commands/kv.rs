@@ -417,6 +417,24 @@ pub async fn delete(client: &mut Client, key: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn pick_key(client: &mut Client) -> Result<String> {
+    let resp = client.request_bearer(Method::GET, "/kv", None::<&()>).await?;
+    let body = Client::expect_success(resp).await?;
+    let entries: Vec<KvEntry> = serde_json::from_str(&body).unwrap_or_else(|_| vec![]);
+    if entries.is_empty() {
+        anyhow::bail!("no KV entries found");
+    }
+    let lines: Vec<String> = entries
+        .iter()
+        .map(|e| match &e.scope {
+            Some(s) => format!("{} [scope:{}]", e.key, s),
+            None => e.key.clone(),
+        })
+        .collect();
+    let selected = crate::fzf::select(&lines, false, "Select key > ")?;
+    Ok(entries[selected[0]].key.clone())
+}
+
 fn urlencoding(s: &str) -> String {
     s.chars()
         .flat_map(|c| {

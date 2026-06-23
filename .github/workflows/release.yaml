@@ -74,11 +74,15 @@ jobs:
           VERSION: ${{ steps.version.outputs.tag }}
           CARGO_INCREMENTAL: "0"
 
+      - name: Generate man page
+        if: runner.os != 'Windows'
+        run: target/${{ matrix.target }}/release/kv generate-man-page > kv.1
+
       - name: Package (unix)
         if: runner.os != 'Windows'
         run: |
           bin=target/${{ matrix.target }}/release/kv
-          tar czf ${{ matrix.archive }} -C $(dirname $bin) $(basename $bin)
+          tar czf ${{ matrix.archive }} -C $(dirname $bin) $(basename $bin) -C ${{ github.workspace }} kv.1
 
       - name: Package (windows)
         if: runner.os == 'Windows'

@@ -5,7 +5,7 @@ mod crypto;
 mod fzf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use client::Client;
 use config::Config;
@@ -27,9 +27,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Get a value by key
+    /// Get a value by key (launches fzf picker if no key given)
     Get {
-        key: String,
+        key: Option<String>,
         /// API key token for approval-required or one-time share links
         #[arg(long)]
         token: Option<String>,
@@ -50,7 +50,7 @@ enum Cmd {
         /// Allow open (unauthenticated) read access
         #[arg(long)]
         open: bool,
-        /// Encrypt for all registered devices
+        /// Encrypt for selected registered devices (fzf multi-select)
         #[arg(long)]
         device: bool,
     },
@@ -60,9 +60,9 @@ enum Cmd {
         #[arg(long)]
         prefix: Option<String>,
     },
-    /// Delete a key
+    /// Delete a key (launches fzf picker if no key given)
     Delete {
-        key: String,
+        key: Option<String>,
     },
     /// Store an API key in local config
     AddApiToken {
@@ -78,6 +78,9 @@ enum Cmd {
     /// Manage device registration
     #[command(subcommand)]
     Device(DeviceCmd),
+    /// Write the man page to stdout
+    #[command(hide = true)]
+    GenerateManPage,
 }
 
 #[derive(Subcommand)]
@@ -142,11 +145,23 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    if matches!(cli.command, Cmd::GenerateManPage) {
+        let cmd = Cli::command();
+        let man = clap_mangen::Man::new(cmd);
+        man.render(&mut std::io::stdout())?;
+        return Ok(());
+    }
+
     let cfg = Config::load()?;
     let mut client = Client::new(cfg, cli.base_url, cli.silent);
 
     match cli.command {
         Cmd::Get { key, token } => {
+            let key = match key {
+                Some(k) => k,
+                None => commands::kv::pick_key(&mut client).await?,
+            };
             commands::kv::get(&mut client, &key, token).await?;
         }
         Cmd::Set { key, value, scope, ttl, sliding, open, device } => {
@@ -156,6 +171,10 @@ async fn run() -> Result<()> {
             commands::kv::list(&mut client, prefix).await?;
         }
         Cmd::Delete { key } => {
+            let key = match key {
+                Some(k) => k,
+                None => commands::kv::pick_key(&mut client).await?,
+            };
             commands::kv::delete(&mut client, &key).await?;
         }
         Cmd::AddApiToken { token } => {
@@ -200,6 +219,7 @@ async fn run() -> Result<()> {
                 commands::device::unregister(&mut client, id).await?;
             }
         },
+        Cmd::GenerateManPage => unreachable!(),
     }
 
     Ok(())
