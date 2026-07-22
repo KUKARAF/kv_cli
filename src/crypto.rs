@@ -38,10 +38,18 @@ pub fn decrypt_device_kv(
 
     let shared = secret.diffie_hellman(&eph_pub);
 
-    let dek = unwrap_dek(shared.as_bytes(), &B64.decode(dek_nonce_b64)?, &B64.decode(encrypted_dek_b64)?)?;
+    let dek = unwrap_dek(
+        shared.as_bytes(),
+        &B64.decode(dek_nonce_b64)?,
+        &B64.decode(encrypted_dek_b64)?,
+    )?;
 
-    let body_nonce = B64.decode(body_nonce_b64).context("invalid nonce encoding")?;
-    let ciphertext = B64.decode(ciphertext_b64).context("invalid ciphertext encoding")?;
+    let body_nonce = B64
+        .decode(body_nonce_b64)
+        .context("invalid nonce encoding")?;
+    let ciphertext = B64
+        .decode(ciphertext_b64)
+        .context("invalid ciphertext encoding")?;
     let aad = B64.decode(aad_b64).context("invalid aad encoding")?;
     decrypt_body(&dek, &body_nonce, &ciphertext, &aad)
 }
@@ -65,7 +73,7 @@ pub struct EncryptedPayload {
 
 #[allow(deprecated)]
 pub fn encrypt_for_devices(
-    kv_key: &str,
+    aad: &str,
     plaintext: &[u8],
     devices: &[(String, String, String)], // (device_id, key_type, public_key_b64)
 ) -> Result<EncryptedPayload> {
@@ -81,20 +89,24 @@ pub fn encrypt_for_devices(
     let mut body_nonce = [0u8; 12];
     rng.fill_bytes(&mut body_nonce);
 
-    let aad_str = format!("device-kv:{kv_key}");
-    let aad_bytes = aad_str.as_bytes();
+    let aad_bytes = aad.as_bytes();
 
     let body_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&dek));
     let ciphertext = body_cipher
         .encrypt(
             Nonce::from_slice(&body_nonce),
-            Payload { msg: plaintext, aad: aad_bytes },
+            Payload {
+                msg: plaintext,
+                aad: aad_bytes,
+            },
         )
         .map_err(|_| anyhow::anyhow!("body encryption failed"))?;
 
     let mut recipients = Vec::new();
     for (device_id, key_type, public_key_b64) in devices {
-        let pub_bytes = B64.decode(public_key_b64).context("invalid device public key")?;
+        let pub_bytes = B64
+            .decode(public_key_b64)
+            .context("invalid device public key")?;
         let (eph_pub_bytes, shared_bytes) = match key_type.as_str() {
             "x25519" => wrap_x25519(&pub_bytes)?,
             "p256" => wrap_p256(&pub_bytes)?,
@@ -174,7 +186,10 @@ fn decrypt_body(dek: &[u8], nonce: &[u8], ciphertext: &[u8], aad: &[u8]) -> Resu
     cipher
         .decrypt(
             Nonce::from_slice(nonce),
-            Payload { msg: ciphertext, aad },
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
         )
         .map_err(|_| anyhow::anyhow!("body decryption failed"))
 }

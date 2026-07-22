@@ -11,8 +11,6 @@ use crate::client::Client;
 #[derive(Serialize)]
 struct DeviceKvWriteRequest {
     key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scope: Option<String>,
     nonce: String,
     ciphertext: String,
     aad: String,
@@ -45,18 +43,6 @@ struct KvUpsertRequest {
     open_access: bool,
 }
 
-#[derive(Serialize)]
-struct AdminKvWriteRequest {
-    key: String,
-    value: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scope: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ttl_hours: Option<f64>,
-    ttl_sliding: bool,
-    open_access: bool,
-}
-
 // ── Device-encrypted KV response ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -79,8 +65,6 @@ struct DeviceKvRecipient {
 #[derive(Deserialize, Tabled)]
 struct KvEntry {
     key: String,
-    #[tabled(display_with = "opt_str")]
-    scope: Option<String>,
     #[tabled(display_with = "opt_f64", rename = "ttl_hours")]
     ttl_hours: Option<f64>,
     #[tabled(display_with = "opt_str", rename = "expires_at")]
@@ -146,13 +130,20 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
                 }
                 let had_session_token = client.cfg.session_token.is_some();
                 // Try existing session token silently first
-                if let Some(resp) = client.try_bearer_silent(Method::GET, &path, None::<&()>).await? {
+                if let Some(resp) = client
+                    .try_bearer_silent(Method::GET, &path, None::<&()>)
+                    .await?
+                {
                     let status = resp.status();
                     let body_text = resp.text().await.unwrap_or_default();
                     if status.as_u16() == 403 {
                         let b: serde_json::Value =
                             serde_json::from_str(&body_text).unwrap_or_default();
-                        if b["error"].as_str().unwrap_or("").starts_with("device-encrypted") {
+                        if b["error"]
+                            .as_str()
+                            .unwrap_or("")
+                            .starts_with("device-encrypted")
+                        {
                             return fetch_and_decrypt(client, key).await;
                         }
                     }
@@ -167,7 +158,9 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
                     return get_with_token(client, key, &api_key).await;
                 }
                 // No usable session token: prompt for one
-                let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+                let resp = client
+                    .request_bearer(Method::GET, &path, None::<&()>)
+                    .await?;
                 let body = Client::expect_success(resp).await?;
                 print!("{body}");
                 return Ok(());
@@ -177,12 +170,17 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
     }
 
     // No API key in config: use session token directly
-    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+    let resp = client
+        .request_bearer(Method::GET, &path, None::<&()>)
+        .await?;
     if resp.status().as_u16() == 403 {
         let body: serde_json::Value =
-            serde_json::from_str(&resp.text().await.unwrap_or_default())
-                .unwrap_or_default();
-        if body["error"].as_str().unwrap_or("").starts_with("device-encrypted") {
+            serde_json::from_str(&resp.text().await.unwrap_or_default()).unwrap_or_default();
+        if body["error"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("device-encrypted")
+        {
             return fetch_and_decrypt(client, key).await;
         }
         bail!("{}", body["error"].as_str().unwrap_or("forbidden"));
@@ -193,16 +191,16 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
 }
 
 async fn fetch_and_decrypt(client: &mut Client, key: &str) -> Result<()> {
-    let device_id = client
-        .cfg
-        .device_id
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("key is device-encrypted; run `kv device register` first"))?;
+    let device_id = client.cfg.device_id.clone().ok_or_else(|| {
+        anyhow::anyhow!("key is device-encrypted; run `kv device register` first")
+    })?;
 
     let priv_key_b64 = crate::commands::device::load_private_key_b64()?;
 
     let path = format!("/api/admin/devices/{}/kv/{}", device_id, urlencoding(key));
-    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+    let resp = client
+        .request_bearer(Method::GET, &path, None::<&()>)
+        .await?;
     let text = Client::expect_success(resp).await?;
 
     let payload: DeviceKvResponse =
@@ -223,14 +221,16 @@ async fn fetch_and_decrypt(client: &mut Client, key: &str) -> Result<()> {
 }
 
 async fn call_request_access(client: &Client, api_key: &str) -> Result<String> {
-    let resp = client.post_with_api_key("/kv/request-access", api_key).await?;
+    let resp = client
+        .post_with_api_key("/kv/request-access", api_key)
+        .await?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         bail!("server returned {status}: {body}");
     }
-    let parsed: RequestAccessResponse = serde_json::from_str(&body)
-        .map_err(|_| anyhow::anyhow!("unexpected response: {body}"))?;
+    let parsed: RequestAccessResponse =
+        serde_json::from_str(&body).map_err(|_| anyhow::anyhow!("unexpected response: {body}"))?;
     Ok(parsed.confirm)
 }
 
@@ -260,8 +260,7 @@ async fn get_with_token(client: &Client, key: &str, api_key: &str) -> Result<()>
         401 => bail!("link expired or already used"),
         403 => {
             let body: serde_json::Value =
-                serde_json::from_str(&resp.text().await.unwrap_or_default())
-                    .unwrap_or_default();
+                serde_json::from_str(&resp.text().await.unwrap_or_default()).unwrap_or_default();
             if body["error"].as_str() != Some("pending approval") {
                 bail!("{}", body["error"].as_str().unwrap_or("access denied"));
             }
@@ -295,50 +294,29 @@ pub async fn set(
     client: &mut Client,
     key: &str,
     value: String,
-    scope: Option<String>,
     ttl_hours: Option<f64>,
     sliding: bool,
     open: bool,
     device: bool,
 ) -> Result<()> {
     if device {
-        return set_device_encrypted(client, key, value.as_bytes(), scope).await;
+        return set_device_encrypted(client, key, value.as_bytes()).await;
     }
-    if let Some(ref sc) = scope {
-        let body = AdminKvWriteRequest {
-            key: key.to_string(),
-            value,
-            scope: Some(sc.clone()),
-            ttl_hours,
-            ttl_sliding: sliding,
-            open_access: open,
-        };
-        let resp = client
-            .request_bearer(Method::PUT, "/api/admin/kv", Some(&body))
-            .await?;
-        Client::expect_success(resp).await?;
-    } else {
-        let path = format!("/kv/{}", urlencoding(key));
-        let body = KvUpsertRequest {
-            value,
-            ttl_hours,
-            ttl_sliding: sliding,
-            open_access: open,
-        };
-        let resp = client
-            .request_bearer(Method::PUT, &path, Some(&body))
-            .await?;
-        Client::expect_success(resp).await?;
-    }
+    let path = format!("/kv/{}", urlencoding(key));
+    let body = KvUpsertRequest {
+        value,
+        ttl_hours,
+        ttl_sliding: sliding,
+        open_access: open,
+    };
+    let resp = client
+        .request_bearer(Method::PUT, &path, Some(&body))
+        .await?;
+    Client::expect_success(resp).await?;
     Ok(())
 }
 
-async fn set_device_encrypted(
-    client: &mut Client,
-    key: &str,
-    plaintext: &[u8],
-    scope: Option<String>,
-) -> Result<()> {
+async fn set_device_encrypted(client: &mut Client, key: &str, plaintext: &[u8]) -> Result<()> {
     let resp = client
         .request_bearer(Method::GET, "/api/admin/devices", None::<&()>)
         .await?;
@@ -358,14 +336,20 @@ async fn set_device_encrypted(
 
     let device_tuples: Vec<(String, String, String)> = selected
         .iter()
-        .map(|&i| (devices[i].id.clone(), devices[i].key_type.clone(), devices[i].public_key.clone()))
+        .map(|&i| {
+            (
+                devices[i].id.clone(),
+                devices[i].key_type.clone(),
+                devices[i].public_key.clone(),
+            )
+        })
         .collect();
 
-    let payload = crate::crypto::encrypt_for_devices(key, plaintext, &device_tuples)?;
+    let aad = format!("device-kv:{key}");
+    let payload = crate::crypto::encrypt_for_devices(&aad, plaintext, &device_tuples)?;
 
     let body = DeviceKvWriteRequest {
         key: key.to_string(),
-        scope,
         nonce: payload.nonce,
         ciphertext: payload.ciphertext,
         aad: payload.aad,
@@ -396,7 +380,9 @@ pub async fn list(client: &mut Client, prefix: Option<String>) -> Result<()> {
         Some(p) => format!("/kv?prefix={}", urlencoding(p)),
         None => "/kv".to_string(),
     };
-    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+    let resp = client
+        .request_bearer(Method::GET, &path, None::<&()>)
+        .await?;
     let body = Client::expect_success(resp).await?;
     let entries: Vec<KvEntry> = serde_json::from_str(&body).unwrap_or_else(|_| vec![]);
     if entries.is_empty() {
@@ -418,19 +404,15 @@ pub async fn delete(client: &mut Client, key: &str) -> Result<()> {
 }
 
 pub async fn pick_key(client: &mut Client) -> Result<String> {
-    let resp = client.request_bearer(Method::GET, "/kv", None::<&()>).await?;
+    let resp = client
+        .request_bearer(Method::GET, "/kv", None::<&()>)
+        .await?;
     let body = Client::expect_success(resp).await?;
     let entries: Vec<KvEntry> = serde_json::from_str(&body).unwrap_or_else(|_| vec![]);
     if entries.is_empty() {
         anyhow::bail!("no KV entries found");
     }
-    let lines: Vec<String> = entries
-        .iter()
-        .map(|e| match &e.scope {
-            Some(s) => format!("{} [scope:{}]", e.key, s),
-            None => e.key.clone(),
-        })
-        .collect();
+    let lines: Vec<String> = entries.iter().map(|e| e.key.clone()).collect();
     let selected = crate::fzf::select(&lines, false, "Select key > ")?;
     Ok(entries[selected[0]].key.clone())
 }

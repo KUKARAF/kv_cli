@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod crypto;
 mod fzf;
+mod management_keys;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -38,9 +39,6 @@ enum Cmd {
     Set {
         key: String,
         value: String,
-        /// Restrict to this scope (uses admin endpoint)
-        #[arg(long)]
-        scope: Option<String>,
         /// TTL in hours
         #[arg(long)]
         ttl: Option<f64>,
@@ -61,9 +59,7 @@ enum Cmd {
         prefix: Option<String>,
     },
     /// Delete a key (launches fzf picker if no key given)
-    Delete {
-        key: Option<String>,
-    },
+    Delete { key: Option<String> },
     /// Store an API key in local config
     AddApiToken {
         /// The API key to store (prompted securely if omitted)
@@ -78,6 +74,9 @@ enum Cmd {
     /// Manage device registration
     #[command(subcommand)]
     Device(DeviceCmd),
+    /// Manage third-party provider management keys (always device-encrypted)
+    #[command(subcommand, name = "mgmt-key")]
+    MgmtKey(MgmtKeyCmd),
     /// Write the man page to stdout
     #[command(hide = true)]
     GenerateManPage,
@@ -94,14 +93,12 @@ enum KeysCmd {
         /// Key type: standard, one_time, approval_required
         #[arg(long, default_value = "standard")]
         r#type: String,
-        /// Scope rules, repeatable: "pattern:read,write"
-        #[arg(long = "scope", value_name = "SCOPE")]
-        scopes: Vec<String>,
+        /// KV keys this token may access, repeatable
+        #[arg(long = "allow-key", value_name = "KEY")]
+        allowed_keys: Vec<String>,
     },
     /// Revoke an API key by ID
-    Revoke {
-        id: String,
-    },
+    Revoke { id: String },
 }
 
 #[derive(Subcommand)]
@@ -114,8 +111,56 @@ enum DeviceCmd {
     /// List all registered devices
     List,
     /// Unregister a device (launches fzf picker if no ID given)
-    Unregister {
-        id: Option<String>,
+    Unregister { id: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum MgmtKeyCmd {
+    /// Store a provider management key, encrypted to selected registered devices
+    Add {
+        label: String,
+        /// Provider this management key belongs to
+        #[arg(long, default_value = "openrouter")]
+        provider: String,
+    },
+    /// List stored management key records (metadata only)
+    List,
+    /// Revoke a stored management key record
+    Revoke { id: String },
+    /// Operate on the keys a management key provisions on the provider
+    #[command(subcommand)]
+    Keys(MgmtKeyKeysCmd),
+}
+
+#[derive(Subcommand)]
+enum MgmtKeyKeysCmd {
+    /// List keys live from the provider (decrypts the management key locally)
+    List {
+        /// Management key id
+        mgmt_key_id: String,
+    },
+    /// Create a new key on the provider and store it encrypted
+    Create {
+        /// Management key id
+        mgmt_key_id: String,
+        label: String,
+        /// Provider-specific usage/spend limit, if supported
+        #[arg(long)]
+        limit: Option<f64>,
+    },
+    /// Revoke a key on the provider
+    Revoke {
+        /// Management key id
+        mgmt_key_id: String,
+        /// The provider's key id (as shown by `keys list`)
+        provider_key_id: String,
+    },
+    /// Decrypt and reprint a previously generated key's plaintext
+    Show {
+        /// Management key id
+        mgmt_key_id: String,
+        /// Our stored provisioned-key id (not the provider's id)
+        provisioned_key_id: String,
     },
 }
 
@@ -164,8 +209,15 @@ async fn run() -> Result<()> {
             };
             commands::kv::get(&mut client, &key, token).await?;
         }
-        Cmd::Set { key, value, scope, ttl, sliding, open, device } => {
-            commands::kv::set(&mut client, &key, value, scope, ttl, sliding, open, device).await?;
+        Cmd::Set {
+            key,
+            value,
+            ttl,
+            sliding,
+            open,
+            device,
+        } => {
+            commands::kv::set(&mut client, &key, value, ttl, sliding, open, device).await?;
         }
         Cmd::List { prefix } => {
             commands::kv::list(&mut client, prefix).await?;
@@ -180,8 +232,9 @@ async fn run() -> Result<()> {
         Cmd::AddApiToken { token } => {
             let key = match token {
                 Some(t) => t,
-                None => rpassword::prompt_password("API key: ")
-                    .context("failed to read API key")?,
+                None => {
+                    rpassword::prompt_password("API key: ").context("failed to read API key")?
+                }
             };
             client.cfg.api_key = Some(key.trim().to_string());
             client.cfg.save()?;
@@ -191,8 +244,12 @@ async fn run() -> Result<()> {
             KeysCmd::List => {
                 commands::keys::list(&mut client).await?;
             }
-            KeysCmd::Create { label, r#type, scopes } => {
-                commands::keys::create(&mut client, label, r#type, scopes).await?;
+            KeysCmd::Create {
+                label,
+                r#type,
+                allowed_keys,
+            } => {
+                commands::keys::create(&mut client, label, r#type, allowed_keys).await?;
             }
             KeysCmd::Revoke { id } => {
                 commands::keys::revoke(&mut client, &id).await?;
@@ -218,6 +275,43 @@ async fn run() -> Result<()> {
             DeviceCmd::Unregister { id } => {
                 commands::device::unregister(&mut client, id).await?;
             }
+        },
+        Cmd::MgmtKey(mgmt_key_cmd) => match mgmt_key_cmd {
+            MgmtKeyCmd::Add { label, provider } => {
+                management_keys::add(&mut client, label, provider).await?;
+            }
+            MgmtKeyCmd::List => {
+                management_keys::list(&mut client).await?;
+            }
+            MgmtKeyCmd::Revoke { id } => {
+                management_keys::revoke(&mut client, &id).await?;
+            }
+            MgmtKeyCmd::Keys(keys_cmd) => match keys_cmd {
+                MgmtKeyKeysCmd::List { mgmt_key_id } => {
+                    management_keys::keys_list(&mut client, &mgmt_key_id).await?;
+                }
+                MgmtKeyKeysCmd::Create {
+                    mgmt_key_id,
+                    label,
+                    limit,
+                } => {
+                    management_keys::keys_create(&mut client, &mgmt_key_id, &label, limit).await?;
+                }
+                MgmtKeyKeysCmd::Revoke {
+                    mgmt_key_id,
+                    provider_key_id,
+                } => {
+                    management_keys::keys_revoke(&mut client, &mgmt_key_id, &provider_key_id)
+                        .await?;
+                }
+                MgmtKeyKeysCmd::Show {
+                    mgmt_key_id,
+                    provisioned_key_id,
+                } => {
+                    management_keys::keys_show(&mut client, &mgmt_key_id, &provisioned_key_id)
+                        .await?;
+                }
+            },
         },
         Cmd::GenerateManPage => unreachable!(),
     }
