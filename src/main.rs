@@ -122,11 +122,32 @@ enum MgmtKeyCmd {
         /// Provider this management key belongs to
         #[arg(long, default_value = "openrouter")]
         provider: String,
+        /// Default spend limit applied to keys generated via this management key
+        #[arg(long)]
+        default_limit: Option<f64>,
+        /// Default limit reset cadence: daily, weekly, or monthly
+        #[arg(long)]
+        default_limit_reset: Option<String>,
     },
     /// List stored management key records (metadata only)
     List,
     /// Revoke a stored management key record
     Revoke { id: String },
+    /// Update a management key's default limit / limit-reset cadence
+    SetDefaults {
+        id: String,
+        #[arg(long)]
+        default_limit: Option<f64>,
+        /// Clear the stored default limit
+        #[arg(long)]
+        clear_default_limit: bool,
+        /// daily, weekly, or monthly
+        #[arg(long)]
+        default_limit_reset: Option<String>,
+        /// Clear the stored default limit-reset cadence
+        #[arg(long)]
+        clear_default_limit_reset: bool,
+    },
     /// Operate on the keys a management key provisions on the provider
     #[command(subcommand)]
     Keys(MgmtKeyKeysCmd),
@@ -144,9 +165,12 @@ enum MgmtKeyKeysCmd {
         /// Management key id
         mgmt_key_id: String,
         label: String,
-        /// Provider-specific usage/spend limit, if supported
+        /// Provider-specific usage/spend limit, if supported (overrides the management key's default)
         #[arg(long)]
         limit: Option<f64>,
+        /// Limit reset cadence: daily, weekly, or monthly (overrides the management key's default)
+        #[arg(long)]
+        limit_reset: Option<String>,
     },
     /// Revoke a key on the provider
     Revoke {
@@ -277,14 +301,43 @@ async fn run() -> Result<()> {
             }
         },
         Cmd::MgmtKey(mgmt_key_cmd) => match mgmt_key_cmd {
-            MgmtKeyCmd::Add { label, provider } => {
-                management_keys::add(&mut client, label, provider).await?;
+            MgmtKeyCmd::Add {
+                label,
+                provider,
+                default_limit,
+                default_limit_reset,
+            } => {
+                management_keys::add(
+                    &mut client,
+                    label,
+                    provider,
+                    default_limit,
+                    default_limit_reset,
+                )
+                .await?;
             }
             MgmtKeyCmd::List => {
                 management_keys::list(&mut client).await?;
             }
             MgmtKeyCmd::Revoke { id } => {
                 management_keys::revoke(&mut client, &id).await?;
+            }
+            MgmtKeyCmd::SetDefaults {
+                id,
+                default_limit,
+                clear_default_limit,
+                default_limit_reset,
+                clear_default_limit_reset,
+            } => {
+                management_keys::set_defaults(
+                    &mut client,
+                    &id,
+                    default_limit,
+                    clear_default_limit,
+                    default_limit_reset,
+                    clear_default_limit_reset,
+                )
+                .await?;
             }
             MgmtKeyCmd::Keys(keys_cmd) => match keys_cmd {
                 MgmtKeyKeysCmd::List { mgmt_key_id } => {
@@ -294,8 +347,16 @@ async fn run() -> Result<()> {
                     mgmt_key_id,
                     label,
                     limit,
+                    limit_reset,
                 } => {
-                    management_keys::keys_create(&mut client, &mgmt_key_id, &label, limit).await?;
+                    management_keys::keys_create(
+                        &mut client,
+                        &mgmt_key_id,
+                        &label,
+                        limit,
+                        limit_reset,
+                    )
+                    .await?;
                 }
                 MgmtKeyKeysCmd::Revoke {
                     mgmt_key_id,

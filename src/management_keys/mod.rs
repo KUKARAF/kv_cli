@@ -46,11 +46,19 @@ struct CreateManagementKeyRequest {
     ciphertext: String,
     aad: String,
     recipients: Vec<DeviceRecipient>,
+    default_limit: Option<f64>,
+    default_limit_reset: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct CreateManagementKeyResponse {
     id: String,
+}
+
+#[derive(Serialize)]
+struct UpdateManagementKeyDefaultsRequest {
+    default_limit: Option<f64>,
+    default_limit_reset: Option<String>,
 }
 
 #[derive(Deserialize, Tabled)]
@@ -62,6 +70,10 @@ struct ManagementKeyRow {
     created_at: String,
     #[tabled(display_with = "opt_str")]
     last_used_at: Option<String>,
+    #[tabled(display_with = "opt_f64")]
+    default_limit: Option<f64>,
+    #[tabled(display_with = "opt_str")]
+    default_limit_reset: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +121,10 @@ fn opt_str(v: &Option<String>) -> String {
     v.as_deref().unwrap_or("-").to_string()
 }
 
+fn opt_f64(v: &Option<f64>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string())
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async fn select_devices(client: &mut Client) -> Result<Vec<(String, String, String)>> {
@@ -144,11 +160,10 @@ fn local_device_id(client: &Client) -> Result<String> {
     })
 }
 
-async fn management_key_provider(client: &mut Client, mgmt_key_id: &str) -> Result<String> {
+async fn management_key_row(client: &mut Client, mgmt_key_id: &str) -> Result<ManagementKeyRow> {
     let rows = list_management_keys(client).await?;
     rows.into_iter()
         .find(|r| r.id == mgmt_key_id)
-        .map(|r| r.provider)
         .ok_or_else(|| anyhow::anyhow!("management key {mgmt_key_id} not found"))
 }
 
@@ -186,8 +201,15 @@ async fn decrypt_management_key(client: &mut Client, mgmt_key_id: &str) -> Resul
 
 // ── Management key commands ──────────────────────────────────────────────────
 
-pub async fn add(client: &mut Client, label: String, provider: String) -> Result<()> {
+pub async fn add(
+    client: &mut Client,
+    label: String,
+    provider: String,
+    default_limit: Option<f64>,
+    default_limit_reset: Option<String>,
+) -> Result<()> {
     providers::provider_for(&provider)?; // validates the provider name early
+    validate_limit_reset(&default_limit_reset)?;
 
     let secret = rpassword::prompt_password(format!("{provider} management key: "))
         .context("failed to read management key")?;
@@ -207,6 +229,8 @@ pub async fn add(client: &mut Client, label: String, provider: String) -> Result
         ciphertext: payload.ciphertext,
         aad: payload.aad,
         recipients: payload.recipients.into_iter().map(Into::into).collect(),
+        default_limit,
+        default_limit_reset,
     };
 
     let resp = client
@@ -216,6 +240,49 @@ pub async fn add(client: &mut Client, label: String, provider: String) -> Result
     let created: CreateManagementKeyResponse =
         serde_json::from_str(&text).context("failed to parse response")?;
     eprintln!("Stored management key '{label}' (id: {})", created.id);
+    Ok(())
+}
+
+fn validate_limit_reset(value: &Option<String>) -> Result<()> {
+    match value.as_deref() {
+        None | Some("daily") | Some("weekly") | Some("monthly") => Ok(()),
+        Some(other) => bail!("invalid limit-reset '{other}': expected daily, weekly, or monthly"),
+    }
+}
+
+/// Sets default_limit/default_limit_reset for a management key. Each `Some` overrides that
+/// field; `None` leaves it as currently stored (fetches the existing row first, since the
+/// server PATCH endpoint replaces both fields unconditionally).
+pub async fn set_defaults(
+    client: &mut Client,
+    id: &str,
+    default_limit: Option<f64>,
+    clear_limit: bool,
+    default_limit_reset: Option<String>,
+    clear_limit_reset: bool,
+) -> Result<()> {
+    validate_limit_reset(&default_limit_reset)?;
+    let current = management_key_row(client, id).await?;
+
+    let body = UpdateManagementKeyDefaultsRequest {
+        default_limit: if clear_limit {
+            None
+        } else {
+            default_limit.or(current.default_limit)
+        },
+        default_limit_reset: if clear_limit_reset {
+            None
+        } else {
+            default_limit_reset.or(current.default_limit_reset)
+        },
+    };
+
+    let path = format!("/api/admin/management-keys/{id}");
+    let resp = client
+        .request_bearer(Method::PATCH, &path, Some(&body))
+        .await?;
+    Client::expect_success(resp).await?;
+    eprintln!("Updated defaults for management key {id}");
     Ok(())
 }
 
@@ -243,8 +310,8 @@ pub async fn revoke(client: &mut Client, id: &str) -> Result<()> {
 
 pub async fn keys_list(client: &mut Client, mgmt_key_id: &str) -> Result<()> {
     let mgmt_key = decrypt_management_key(client, mgmt_key_id).await?;
-    let provider_name = management_key_provider(client, mgmt_key_id).await?;
-    let provider = providers::provider_for(&provider_name)?;
+    let row = management_key_row(client, mgmt_key_id).await?;
+    let provider = providers::provider_for(&row.provider)?;
     let live = provider.list_keys(&mgmt_key).await?;
 
     if live.is_empty() {
@@ -263,11 +330,18 @@ pub async fn keys_create(
     mgmt_key_id: &str,
     label: &str,
     limit: Option<f64>,
+    limit_reset: Option<String>,
 ) -> Result<()> {
+    validate_limit_reset(&limit_reset)?;
     let mgmt_key = decrypt_management_key(client, mgmt_key_id).await?;
-    let provider_name = management_key_provider(client, mgmt_key_id).await?;
-    let provider = providers::provider_for(&provider_name)?;
-    let created = provider.create_key(&mgmt_key, label, limit).await?;
+    let row = management_key_row(client, mgmt_key_id).await?;
+    let provider = providers::provider_for(&row.provider)?;
+    // CLI flags override the management key's stored defaults when given.
+    let limit = limit.or(row.default_limit);
+    let limit_reset = limit_reset.or(row.default_limit_reset);
+    let created = provider
+        .create_key(&mgmt_key, label, limit, limit_reset.as_deref())
+        .await?;
 
     let device_tuples = select_devices(client).await?;
     let aad = format!("provisioned-key:{}", created.provider_key_id);
@@ -312,8 +386,8 @@ pub async fn keys_revoke(
     provider_key_id: &str,
 ) -> Result<()> {
     let mgmt_key = decrypt_management_key(client, mgmt_key_id).await?;
-    let provider_name = management_key_provider(client, mgmt_key_id).await?;
-    let provider = providers::provider_for(&provider_name)?;
+    let row = management_key_row(client, mgmt_key_id).await?;
+    let provider = providers::provider_for(&row.provider)?;
     provider.revoke_key(&mgmt_key, provider_key_id).await?;
 
     // Best-effort: mark our stored record revoked too, if we have one for this key.

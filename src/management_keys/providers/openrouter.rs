@@ -87,6 +87,7 @@ impl ManagementKeyProvider for OpenRouterProvider {
         management_key: &str,
         label: &str,
         limit: Option<f64>,
+        limit_reset: Option<&str>,
     ) -> Result<ProviderKeyCreated> {
         let url = format!("{BASE_URL}/");
         let body = serde_json::json!({ "name": label, "limit": limit });
@@ -103,6 +104,21 @@ impl ManagementKeyProvider for OpenRouterProvider {
             .json()
             .await
             .context("failed to parse openrouter create-key response")?;
+
+        // Per OpenRouter's docs, `limit_reset` is only documented on the update (PATCH)
+        // endpoint, not on create — so applying a reset cadence takes a follow-up call.
+        if let Some(reset) = limit_reset {
+            let update_url = format!("{BASE_URL}/{}", parsed.data.hash);
+            let resp = self
+                .http
+                .patch(&update_url)
+                .bearer_auth(management_key)
+                .json(&serde_json::json!({ "limit_reset": reset }))
+                .send()
+                .await
+                .context("openrouter update-key (limit_reset) request failed")?;
+            error_for_status(resp).await?;
+        }
 
         Ok(ProviderKeyCreated {
             provider_key_id: parsed.data.hash,

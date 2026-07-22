@@ -26,6 +26,7 @@ pub trait ManagementKeyProvider {
         management_key: &str,
         label: &str,
         limit: Option<f64>,
+        limit_reset: Option<&str>,
     ) -> Result<ProviderKeyCreated>;
     async fn revoke_key(&self, management_key: &str, provider_key_id: &str) -> Result<()>;
 }
