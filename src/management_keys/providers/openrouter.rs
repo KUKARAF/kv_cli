@@ -89,11 +89,10 @@ impl ManagementKeyProvider for OpenRouterProvider {
         limit: Option<f64>,
         limit_reset: Option<&str>,
     ) -> Result<ProviderKeyCreated> {
-        let url = format!("{BASE_URL}/");
         let body = serde_json::json!({ "name": label, "limit": limit });
         let resp = self
             .http
-            .post(&url)
+            .post(BASE_URL)
             .bearer_auth(management_key)
             .json(&body)
             .send()
