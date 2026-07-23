@@ -21,7 +21,8 @@ impl OpenRouterProvider {
 // The docs confirm the endpoints/methods below but not the exact response field
 // names for `data` entries — `id` is accepted as an alias for `hash` in case the
 // live API uses one or the other. Verify against a real account and adjust if
-// OpenRouter's response shape differs.
+// OpenRouter's response shape differs. `limit`/`limit_reset` on GET responses are
+// similarly unconfirmed from docs alone — parsed optionally for the same reason.
 #[derive(Deserialize)]
 struct KeyData {
     #[serde(alias = "id")]
@@ -29,11 +30,30 @@ struct KeyData {
     name: String,
     #[serde(default)]
     disabled: bool,
+    limit: Option<f64>,
+    limit_reset: Option<String>,
+}
+
+impl KeyData {
+    fn into_info(self) -> ProviderKeyInfo {
+        ProviderKeyInfo {
+            provider_key_id: self.hash,
+            label: self.name,
+            disabled: self.disabled,
+            limit: self.limit,
+            limit_reset: self.limit_reset,
+        }
+    }
 }
 
 #[derive(Deserialize)]
 struct ListResponse {
     data: Vec<KeyData>,
+}
+
+#[derive(Deserialize)]
+struct GetResponse {
+    data: KeyData,
 }
 
 #[derive(Deserialize)]
@@ -71,15 +91,24 @@ impl ManagementKeyProvider for OpenRouterProvider {
             .await
             .context("failed to parse openrouter list-keys response")?;
 
-        Ok(parsed
-            .data
-            .into_iter()
-            .map(|k| ProviderKeyInfo {
-                provider_key_id: k.hash,
-                label: k.name,
-                disabled: k.disabled,
-            })
-            .collect())
+        Ok(parsed.data.into_iter().map(KeyData::into_info).collect())
+    }
+
+    async fn get_key(&self, management_key: &str, provider_key_id: &str) -> Result<ProviderKeyInfo> {
+        let url = format!("{BASE_URL}/{provider_key_id}");
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(management_key)
+            .send()
+            .await
+            .context("openrouter get-key request failed")?;
+        let resp = error_for_status(resp).await?;
+        let parsed: GetResponse = resp
+            .json()
+            .await
+            .context("failed to parse openrouter get-key response")?;
+        Ok(parsed.data.into_info())
     }
 
     async fn create_key(

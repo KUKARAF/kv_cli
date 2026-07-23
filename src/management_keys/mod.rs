@@ -343,6 +343,27 @@ pub async fn keys_create(
         .create_key(&mgmt_key, label, limit, limit_reset.as_deref())
         .await?;
 
+    let stored_id = store_provisioned_key(client, mgmt_key_id, &created).await?;
+
+    eprintln!();
+    eprintln!(
+        "Created {} key '{}' (provider id: {})",
+        provider.id(),
+        created.label,
+        created.provider_key_id
+    );
+    eprintln!("Secret (shown once): {}", created.plaintext_secret);
+    eprintln!("Stored encrypted as {}", stored_id);
+    Ok(())
+}
+
+/// Encrypts a newly-created provider key for a freshly-selected set of devices and stores
+/// it. Shared by `keys_create` and `keys_rotate`. Returns our local record id.
+async fn store_provisioned_key(
+    client: &mut Client,
+    mgmt_key_id: &str,
+    created: &providers::ProviderKeyCreated,
+) -> Result<String> {
     let device_tuples = select_devices(client).await?;
     let aad = format!("provisioned-key:{}", created.provider_key_id);
     let payload = crate::crypto::encrypt_for_devices(
@@ -367,17 +388,33 @@ pub async fn keys_create(
     let text = Client::expect_success(resp).await?;
     let created_row: CreateProvisionedKeyResponse =
         serde_json::from_str(&text).context("failed to parse response")?;
+    Ok(created_row.id)
+}
 
-    eprintln!();
-    eprintln!(
-        "Created {} key '{}' (provider id: {})",
-        provider.id(),
-        created.label,
-        created.provider_key_id
-    );
-    eprintln!("Secret (shown once): {}", created.plaintext_secret);
-    eprintln!("Stored encrypted as {}", created_row.id);
-    Ok(())
+/// Best-effort: delete our local record for `provider_key_id` if one exists. Returns whether
+/// a matching record was found (and its deletion attempted) — callers decide how to report
+/// a deletion failure since the severity differs (revoke: non-fatal; rotate: also non-fatal,
+/// but the caller may want different wording).
+async fn delete_local_provisioned_key(
+    client: &mut Client,
+    mgmt_key_id: &str,
+    provider_key_id: &str,
+) -> Result<bool> {
+    let path = format!("/api/admin/management-keys/{mgmt_key_id}/provisioned-keys");
+    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+    let body = Client::expect_success(resp).await?;
+    let rows: Vec<ProvisionedKeyRow> =
+        serde_json::from_str(&body).context("failed to parse response")?;
+    let Some(row) = rows.iter().find(|r| r.provider_key_id == provider_key_id) else {
+        return Ok(false);
+    };
+    let delete_path =
+        format!("/api/admin/management-keys/{mgmt_key_id}/provisioned-keys/{}", row.id);
+    let del_resp = client
+        .request_bearer(Method::DELETE, &delete_path, None::<&()>)
+        .await?;
+    Client::expect_success(del_resp).await?;
+    Ok(true)
 }
 
 pub async fn keys_revoke(
@@ -393,23 +430,63 @@ pub async fn keys_revoke(
     // Provider-side delete succeeded — clean up our local record if we have one. Must not
     // fail silently: if we DO have a stored copy but can't delete it, that's a real
     // inconsistency (a now-invalid secret left recoverable via SHOW) the user needs to know.
-    let path = format!("/api/admin/management-keys/{mgmt_key_id}/provisioned-keys");
-    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
-    let body = Client::expect_success(resp).await?;
-    let rows: Vec<ProvisionedKeyRow> =
-        serde_json::from_str(&body).context("failed to parse response")?;
-    if let Some(row) = rows.iter().find(|r| r.provider_key_id == provider_key_id) {
-        let delete_path =
-            format!("/api/admin/management-keys/{mgmt_key_id}/provisioned-keys/{}", row.id);
-        let del_resp = client
-            .request_bearer(Method::DELETE, &delete_path, None::<&()>)
-            .await?;
-        Client::expect_success(del_resp)
-            .await
-            .context("revoked on provider but failed to delete local record")?;
-    }
+    delete_local_provisioned_key(client, mgmt_key_id, provider_key_id)
+        .await
+        .context("revoked on provider but failed to delete local record")?;
 
     eprintln!("Revoked {provider_key_id} on {}", provider.id());
+    Ok(())
+}
+
+pub async fn keys_rotate(
+    client: &mut Client,
+    mgmt_key_id: &str,
+    provider_key_id: &str,
+) -> Result<()> {
+    let mgmt_key = decrypt_management_key(client, mgmt_key_id).await?;
+    let row = management_key_row(client, mgmt_key_id).await?;
+    let provider = providers::provider_for(&row.provider)?;
+
+    // Read the key's *current* limit/limit_reset from the provider itself — not our stored
+    // defaults, which may be stale or never matched this specific key.
+    let info = provider
+        .get_key(&mgmt_key, provider_key_id)
+        .await
+        .context("failed to fetch current key info from provider — aborting rotation, nothing was changed")?;
+
+    // Delete old, then create new (in that order): there's a brief window with zero active
+    // keys. If create-new then fails, that's the accepted risk of this ordering, so it must
+    // fail loudly (see below) rather than leaving the user thinking nothing happened.
+    provider
+        .revoke_key(&mgmt_key, provider_key_id)
+        .await
+        .context("failed to delete old key on provider — aborting rotation, nothing was changed")?;
+
+    // Best-effort: local cleanup of the old record is non-fatal here — the user still needs
+    // the replacement key regardless of whether our bookkeeping for the old one succeeds.
+    if let Err(e) = delete_local_provisioned_key(client, mgmt_key_id, provider_key_id).await {
+        eprintln!("warning: deleted old key on provider, but failed to remove local record: {e:#}");
+    }
+
+    let created = provider
+        .create_key(&mgmt_key, &info.label, info.limit, info.limit_reset.as_deref())
+        .await
+        .context(
+            "CRITICAL: the old key was already deleted on the provider, but creating its \
+             replacement failed — you now have NO active key for this identity. Retry manually.",
+        )?;
+
+    let stored_id = store_provisioned_key(client, mgmt_key_id, &created).await?;
+
+    eprintln!();
+    eprintln!(
+        "Rotated {} key '{}' (new provider id: {})",
+        provider.id(),
+        created.label,
+        created.provider_key_id
+    );
+    eprintln!("Secret (shown once): {}", created.plaintext_secret);
+    eprintln!("Stored encrypted as {}", stored_id);
     Ok(())
 }
 

@@ -179,6 +179,13 @@ enum MgmtKeyKeysCmd {
         /// The provider's key id (as shown by `keys list`)
         provider_key_id: String,
     },
+    /// Delete a key on the provider and create a replacement with the same label/limit/reset
+    Rotate {
+        /// Management key id
+        mgmt_key_id: String,
+        /// The provider's key id (as shown by `keys list`)
+        provider_key_id: String,
+    },
     /// Decrypt and reprint a previously generated key's plaintext
     Show {
         /// Management key id
@@ -363,6 +370,13 @@ async fn run() -> Result<()> {
                     provider_key_id,
                 } => {
                     management_keys::keys_revoke(&mut client, &mgmt_key_id, &provider_key_id)
+                        .await?;
+                }
+                MgmtKeyKeysCmd::Rotate {
+                    mgmt_key_id,
+                    provider_key_id,
+                } => {
+                    management_keys::keys_rotate(&mut client, &mgmt_key_id, &provider_key_id)
                         .await?;
                 }
                 MgmtKeyKeysCmd::Show {
