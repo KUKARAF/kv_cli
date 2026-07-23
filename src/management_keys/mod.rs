@@ -390,22 +390,23 @@ pub async fn keys_revoke(
     let provider = providers::provider_for(&row.provider)?;
     provider.revoke_key(&mgmt_key, provider_key_id).await?;
 
-    // Best-effort: mark our stored record revoked too, if we have one for this key.
+    // Provider-side delete succeeded — clean up our local record if we have one. Must not
+    // fail silently: if we DO have a stored copy but can't delete it, that's a real
+    // inconsistency (a now-invalid secret left recoverable via SHOW) the user needs to know.
     let path = format!("/api/admin/management-keys/{mgmt_key_id}/provisioned-keys");
-    if let Ok(resp) = client.request_bearer(Method::GET, &path, None::<&()>).await {
-        if let Ok(body) = Client::expect_success(resp).await {
-            if let Ok(rows) = serde_json::from_str::<Vec<ProvisionedKeyRow>>(&body) {
-                if let Some(row) = rows.iter().find(|r| r.provider_key_id == provider_key_id) {
-                    let revoke_path = format!(
-                        "/api/admin/management-keys/{mgmt_key_id}/provisioned-keys/{}/revoke",
-                        row.id
-                    );
-                    let _ = client
-                        .request_bearer(Method::POST, &revoke_path, None::<&()>)
-                        .await;
-                }
-            }
-        }
+    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+    let body = Client::expect_success(resp).await?;
+    let rows: Vec<ProvisionedKeyRow> =
+        serde_json::from_str(&body).context("failed to parse response")?;
+    if let Some(row) = rows.iter().find(|r| r.provider_key_id == provider_key_id) {
+        let delete_path =
+            format!("/api/admin/management-keys/{mgmt_key_id}/provisioned-keys/{}", row.id);
+        let del_resp = client
+            .request_bearer(Method::DELETE, &delete_path, None::<&()>)
+            .await?;
+        Client::expect_success(del_resp)
+            .await
+            .context("revoked on provider but failed to delete local record")?;
     }
 
     eprintln!("Revoked {provider_key_id} on {}", provider.id());
