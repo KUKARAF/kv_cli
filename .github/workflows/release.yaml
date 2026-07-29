@@ -75,8 +75,15 @@ jobs:
           CARGO_INCREMENTAL: "0"
 
       - name: Generate man page
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !matrix.cross
         run: target/${{ matrix.target }}/release/kv generate-man-page > kv.1
+
+      - name: Generate man page (cross target, native build)
+        # The cross-compiled binary can't run on the host runner (e.g. arm64
+        # binary on an x86_64 runner), but man page content is
+        # architecture-independent, so generate it from a native host build.
+        if: matrix.cross
+        run: cargo run --release --bin kv -- generate-man-page > kv.1
 
       - name: Package (unix)
         if: runner.os != 'Windows'
