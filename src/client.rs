@@ -30,6 +30,12 @@ struct SessionRequestCreated {
     id: String,
     url: String,
     expires_at: String,
+    /// Required to poll for the session token — proves the poller is the same party
+    /// that created the request, not just someone who saw the id in the URL/QR.
+    poll_secret: String,
+    /// Human-verifiable code to relay to whoever approves the request out-of-band —
+    /// approval is bound to this code, not just to clicking the right row.
+    confirm_code: String,
 }
 
 #[derive(Deserialize)]
@@ -88,10 +94,16 @@ impl Client {
         print_qr(&created.url);
 
         eprintln!("  Open the URL or scan the QR code to approve.");
+        eprintln!("  Tell whoever approves this request the confirm code:");
+        eprintln!("  {}", created.confirm_code);
+        eprintln!("  (approval will fail without it — this proves the approval is for you)");
         eprintln!("  Polling every 5s.  Press  Ctrl+C  to cancel.");
         eprintln!();
 
-        let status_path = format!("/api/session-request/{}/status", created.id);
+        let status_path = format!(
+            "/api/session-request/{}/status?secret={}",
+            created.id, created.poll_secret
+        );
         let mut ticker = interval(Duration::from_secs(5));
         ticker.tick().await;
 
