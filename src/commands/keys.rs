@@ -48,8 +48,8 @@ pub async fn list(client: &mut Client) -> Result<()> {
         .request_bearer(Method::GET, "/api/admin/keys", None::<&()>)
         .await?;
     let body = Client::expect_success(resp).await?;
-    let entries: Vec<ApiKeyEntry> = serde_json::from_str(&body)
-        .context("failed to parse keys response")?;
+    let entries: Vec<ApiKeyEntry> =
+        serde_json::from_str(&body).context("failed to parse keys response")?;
     if entries.is_empty() {
         eprintln!("(no keys)");
     } else {
@@ -97,9 +97,9 @@ pub async fn revoke(client: &mut Client, id: &str) -> Result<()> {
 fn parse_scopes(raw: &[String]) -> Result<Vec<ScopeRule>> {
     raw.iter()
         .map(|s| {
-            let (pattern, ops_str) = s
-                .split_once(':')
-                .ok_or_else(|| anyhow::anyhow!("invalid scope format {s:?} — expected pattern:ops"))?;
+            let (pattern, ops_str) = s.split_once(':').ok_or_else(|| {
+                anyhow::anyhow!("invalid scope format {s:?} — expected pattern:ops")
+            })?;
             let ops = ops_str.split(',').map(|o| o.trim().to_string()).collect();
             Ok(ScopeRule {
                 scope: pattern.trim().to_string(),

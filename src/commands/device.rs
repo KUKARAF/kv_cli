@@ -27,7 +27,9 @@ fn load_or_create_key() -> Result<StaticSecret> {
             .decode(b64.trim())
             .context("device.key is not valid base64 — delete it and re-register")?
             .try_into()
-            .map_err(|_| anyhow::anyhow!("device.key has wrong length — delete it and re-register"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("device.key has wrong length — delete it and re-register")
+            })?;
         return Ok(StaticSecret::from(bytes));
     }
     let secret = StaticSecret::random_from_rng(OsRng);
@@ -84,7 +86,11 @@ pub async fn register(client: &mut Client, name: String) -> Result<()> {
     let secret = load_or_create_key()?;
     let public_key = B64.encode(PublicKey::from(&secret).as_bytes());
 
-    let body = RegisterRequest { name: name.clone(), public_key, key_type: "x25519" };
+    let body = RegisterRequest {
+        name: name.clone(),
+        public_key,
+        key_type: "x25519",
+    };
     let resp = client
         .request_bearer(Method::POST, "/api/devices", Some(&body))
         .await?;
@@ -132,7 +138,12 @@ pub async fn unregister(client: &mut Client, id: Option<String>) -> Result<()> {
                 .map(|d| format!("{:<30}  registered: {}", d.name, d.created_at))
                 .collect();
             let selected = crate::fzf::select(&lines, false, "Select device to unregister > ")?;
-            devices[selected[0]].id.clone()
+            let idx = *selected.first().context("fzf returned no selection")?;
+            devices
+                .get(idx)
+                .context("fzf selection index out of range")?
+                .id
+                .clone()
         }
     };
 

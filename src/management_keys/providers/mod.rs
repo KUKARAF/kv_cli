@@ -23,7 +23,8 @@ pub struct ProviderKeyCreated {
 pub trait ManagementKeyProvider {
     fn id(&self) -> &'static str;
     async fn list_keys(&self, management_key: &str) -> Result<Vec<ProviderKeyInfo>>;
-    async fn get_key(&self, management_key: &str, provider_key_id: &str) -> Result<ProviderKeyInfo>;
+    async fn get_key(&self, management_key: &str, provider_key_id: &str)
+        -> Result<ProviderKeyInfo>;
     async fn create_key(
         &self,
         management_key: &str,

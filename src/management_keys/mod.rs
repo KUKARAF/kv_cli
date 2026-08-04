@@ -142,16 +142,15 @@ async fn select_devices(client: &mut Client) -> Result<Vec<(String, String, Stri
         .map(|d| format!("{:<30}  [{}]", d.name, d.key_type))
         .collect();
     let selected = crate::fzf::select(&lines, true, "Encrypt for devices (TAB to toggle) > ")?;
-    Ok(selected
+    selected
         .into_iter()
         .map(|i| {
-            (
-                devices[i].id.clone(),
-                devices[i].key_type.clone(),
-                devices[i].public_key.clone(),
-            )
+            let d = devices
+                .get(i)
+                .ok_or_else(|| anyhow::anyhow!("fzf selection index out of range"))?;
+            Ok((d.id.clone(), d.key_type.clone(), d.public_key.clone()))
         })
-        .collect())
+        .collect::<Result<Vec<_>>>()
 }
 
 fn local_device_id(client: &Client) -> Result<String> {
@@ -401,15 +400,19 @@ async fn delete_local_provisioned_key(
     provider_key_id: &str,
 ) -> Result<bool> {
     let path = format!("/api/admin/management-keys/{mgmt_key_id}/provisioned-keys");
-    let resp = client.request_bearer(Method::GET, &path, None::<&()>).await?;
+    let resp = client
+        .request_bearer(Method::GET, &path, None::<&()>)
+        .await?;
     let body = Client::expect_success(resp).await?;
     let rows: Vec<ProvisionedKeyRow> =
         serde_json::from_str(&body).context("failed to parse response")?;
     let Some(row) = rows.iter().find(|r| r.provider_key_id == provider_key_id) else {
         return Ok(false);
     };
-    let delete_path =
-        format!("/api/admin/management-keys/{mgmt_key_id}/provisioned-keys/{}", row.id);
+    let delete_path = format!(
+        "/api/admin/management-keys/{mgmt_key_id}/provisioned-keys/{}",
+        row.id
+    );
     let del_resp = client
         .request_bearer(Method::DELETE, &delete_path, None::<&()>)
         .await?;
@@ -449,10 +452,9 @@ pub async fn keys_rotate(
 
     // Read the key's *current* limit/limit_reset from the provider itself — not our stored
     // defaults, which may be stale or never matched this specific key.
-    let info = provider
-        .get_key(&mgmt_key, provider_key_id)
-        .await
-        .context("failed to fetch current key info from provider — aborting rotation, nothing was changed")?;
+    let info = provider.get_key(&mgmt_key, provider_key_id).await.context(
+        "failed to fetch current key info from provider — aborting rotation, nothing was changed",
+    )?;
 
     // Delete old, then create new (in that order): there's a brief window with zero active
     // keys. If create-new then fails, that's the accepted risk of this ordering, so it must
@@ -469,7 +471,12 @@ pub async fn keys_rotate(
     }
 
     let created = provider
-        .create_key(&mgmt_key, &info.label, info.limit, info.limit_reset.as_deref())
+        .create_key(
+            &mgmt_key,
+            &info.label,
+            info.limit,
+            info.limit_reset.as_deref(),
+        )
         .await
         .context(
             "CRITICAL: the old key was already deleted on the provider, but creating its \

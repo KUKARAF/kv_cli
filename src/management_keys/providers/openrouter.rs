@@ -94,7 +94,11 @@ impl ManagementKeyProvider for OpenRouterProvider {
         Ok(parsed.data.into_iter().map(KeyData::into_info).collect())
     }
 
-    async fn get_key(&self, management_key: &str, provider_key_id: &str) -> Result<ProviderKeyInfo> {
+    async fn get_key(
+        &self,
+        management_key: &str,
+        provider_key_id: &str,
+    ) -> Result<ProviderKeyInfo> {
         let url = format!("{BASE_URL}/{provider_key_id}");
         let resp = self
             .http

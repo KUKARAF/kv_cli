@@ -1,7 +1,11 @@
-use anyhow::{bail, Result};
 use crate::client::Client;
+use anyhow::{bail, Result};
 
-pub async fn request(client: &mut Client, label: Option<String>, duration: Option<String>) -> Result<()> {
+pub async fn request(
+    client: &mut Client,
+    label: Option<String>,
+    duration: Option<String>,
+) -> Result<()> {
     let hours = duration.as_deref().map(parse_duration_hours).transpose()?;
     client.acquire_session_token(label, hours).await
 }

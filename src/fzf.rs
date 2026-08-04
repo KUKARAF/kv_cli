@@ -13,10 +13,18 @@ pub fn select(items: &[String], multi: bool, prompt: &str) -> Result<Vec<usize>>
     cmd.args(["--prompt", prompt, "--with-nth", "2..", "--delimiter", "\t"]);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
 
-    let mut child = cmd.spawn().context("failed to spawn fzf — is it installed?")?;
+    let mut child = cmd
+        .spawn()
+        .context("failed to spawn fzf — is it installed?")?;
 
     {
-        let stdin = child.stdin.as_mut().unwrap();
+        // We just configured stdin as `Stdio::piped()` above, so `child.stdin`
+        // is guaranteed to be `Some` here; still propagate an error instead of
+        // panicking in case that invariant is ever broken by a future refactor.
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("fzf child process has no stdin pipe")?;
         for (i, item) in items.iter().enumerate() {
             writeln!(stdin, "{i}\t{item}")?;
         }
@@ -27,10 +35,17 @@ pub fn select(items: &[String], multi: bool, prompt: &str) -> Result<Vec<usize>>
         bail!("no selection made");
     }
 
-    let indices = String::from_utf8_lossy(&output.stdout)
+    let indices: Vec<usize> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|l| l.split('\t').next()?.parse::<usize>().ok())
         .collect();
+
+    if indices.is_empty() {
+        bail!("no selection made");
+    }
+    if let Some(&bad) = indices.iter().find(|&&i| i >= items.len()) {
+        bail!("fzf returned out-of-range selection index {bad}");
+    }
 
     Ok(indices)
 }
