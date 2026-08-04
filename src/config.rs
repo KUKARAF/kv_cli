@@ -41,19 +41,8 @@ impl Config {
     }
 
     pub fn base_url(&self) -> &str {
-        self.base_url.as_deref().unwrap_or("https://kv.osmosis.page")
+        self.base_url
+            .as_deref()
+            .unwrap_or("https://kv.osmosis.page")
     }
-
-    /// Return the stored api_key, prompting and saving if absent.
-    pub fn require_api_key(&mut self) -> Result<String> {
-        if let Some(k) = &self.api_key {
-            return Ok(k.clone());
-        }
-        let key = rpassword::prompt_password("API key (X-Api-Key): ")
-            .context("failed to read API key")?;
-        self.api_key = Some(key.trim().to_string());
-        self.save()?;
-        Ok(self.api_key.clone().unwrap())
-    }
-
 }
