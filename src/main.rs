@@ -1,3 +1,4 @@
+mod agent_detect;
 mod client;
 mod commands;
 mod config;
@@ -34,6 +35,15 @@ enum Cmd {
         /// API key token for approval-required or one-time share links
         #[arg(long)]
         token: Option<String>,
+        /// If this looks like an agent reading a secret directly, print its SHA-256 hash instead of the raw value
+        #[arg(long)]
+        return_md5_on_agent_true: bool,
+        /// If this looks like an agent reading a secret directly, print only the last 3 characters instead of the raw value
+        #[arg(long)]
+        show_3_last_digits_on_agent_true: bool,
+        /// Print the raw secret value even if this looks like a direct agent invocation
+        #[arg(long)]
+        dangerously_show_content_on_agent_true: bool,
     },
     /// Set a value
     Set {
@@ -233,12 +243,23 @@ async fn run() -> Result<()> {
     let mut client = Client::new(cfg, cli.base_url, cli.silent);
 
     match cli.command {
-        Cmd::Get { key, token } => {
+        Cmd::Get {
+            key,
+            token,
+            return_md5_on_agent_true,
+            show_3_last_digits_on_agent_true,
+            dangerously_show_content_on_agent_true,
+        } => {
             let key = match key {
                 Some(k) => k,
                 None => commands::kv::pick_key(&mut client).await?,
             };
-            commands::kv::get(&mut client, &key, token).await?;
+            let display = commands::kv::SecretDisplay {
+                md5: return_md5_on_agent_true,
+                last3: show_3_last_digits_on_agent_true,
+                dangerously_show: dangerously_show_content_on_agent_true,
+            };
+            commands::kv::get(&mut client, &key, token, display).await?;
         }
         Cmd::Set {
             key,
@@ -388,6 +409,10 @@ async fn run() -> Result<()> {
                 }
             },
         },
+        // Genuinely unreachable: `Cmd::GenerateManPage` is intercepted and
+        // handled (with an early return) at the top of `run()` before `cli`
+        // is ever used to reach this match, so this arm can never execute.
+        #[allow(clippy::unreachable)]
         Cmd::GenerateManPage => unreachable!(),
     }
 

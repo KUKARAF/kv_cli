@@ -85,14 +85,80 @@ fn opt_f64(v: &Option<f64>) -> String {
     v.map(|f| f.to_string()).unwrap_or_else(|| "-".to_string())
 }
 
+// ── Agent nudge ───────────────────────────────────────────────────────────────
+
+/// How to display a secret once retrieved. Set from `kv get`'s
+/// `--return-md5-on-agent-true` / `--show-3-last-digits-on-agent-true` /
+/// `--dangerously-show-content-on-agent-true` flags.
+#[derive(Clone, Copy, Default)]
+pub struct SecretDisplay {
+    pub md5: bool,
+    pub last3: bool,
+    pub dangerously_show: bool,
+}
+
+/// Prints `value` for key `key` according to `mode`, unless it looks like an
+/// agent is reading the secret directly (see `agent_detect`), in which case
+/// it prints a nudge to stderr instead of the raw value. This is a UX nudge,
+/// not a security control — see `agent_detect` for why it can't be one.
+fn emit_secret(key: &str, value: &str, mode: SecretDisplay) -> Result<()> {
+    if mode.dangerously_show || !crate::agent_detect::should_nudge() {
+        print!("{value}");
+        return Ok(());
+    }
+
+    if mode.md5 {
+        use md5::{Digest, Md5};
+        let hash = Md5::digest(value.as_bytes());
+        println!("{hash:x}");
+        return Ok(());
+    }
+
+    if mode.last3 {
+        let tail: String = {
+            let mut chars: Vec<char> = value.chars().rev().take(3).collect();
+            chars.reverse();
+            chars.into_iter().collect()
+        };
+        println!("...{tail}");
+        return Ok(());
+    }
+
+    eprintln!("success: the key '{key}' exists in the kv store!");
+    eprintln!();
+    eprintln!("Its raw value isn't being printed here because this looks like an AI agent");
+    eprintln!("running `kv get {key}` directly — printing it would put the secret into the");
+    eprintln!("model's context and could leak it to the model provider. If you just want to");
+    eprintln!("confirm the key/value without leaking it, use one of:");
+    eprintln!();
+    eprintln!("  kv get {key} --show-3-last-digits-on-agent-true");
+    eprintln!("  kv get {key} --return-md5-on-agent-true");
+    eprintln!();
+    eprintln!("If this is a false positive, or you've built a safeguard elsewhere to make sure");
+    eprintln!("the value won't reach the model (e.g. it's consumed entirely within a script),");
+    eprintln!("force the raw value with:");
+    eprintln!();
+    eprintln!("  kv get {key} --dangerously-show-content-on-agent-true");
+    eprintln!();
+    eprintln!("Note: using the value inside another command, e.g.");
+    eprintln!("  curl -H \"Authorization: Bearer $(kv get {key})\" https://example.com");
+    eprintln!("does not trigger this message.");
+    anyhow::bail!("refusing to print secret directly to a detected agent invocation");
+}
+
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Result<()> {
+pub async fn get(
+    client: &mut Client,
+    key: &str,
+    token: Option<String>,
+    mode: SecretDisplay,
+) -> Result<()> {
     let path = format!("/kv/{}", urlencoding(key));
 
     if let Some(api_key) = token {
         // Explicit --token: approval-required / one-time flow
-        return get_with_token(client, key, &api_key).await;
+        return get_with_token(client, key, &api_key, mode).await;
     }
 
     if let Some(api_key) = client.cfg.api_key.clone() {
@@ -100,7 +166,8 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
         let resp = client.get_with_api_key(&path, &api_key).await?;
         match resp.status().as_u16() {
             200 => {
-                print!("{}", resp.text().await.unwrap_or_default());
+                let body = resp.text().await.unwrap_or_default();
+                emit_secret(key, &body, mode)?;
                 return Ok(());
             }
             401 | 403 => {
@@ -108,12 +175,12 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
                 let body: serde_json::Value =
                     serde_json::from_str(&resp.text().await.unwrap_or_default())
                         .unwrap_or_default();
-                let err = body["error"].as_str().unwrap_or("");
+                let err = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
                 if err == "pending approval" {
-                    return get_with_token(client, key, &api_key).await;
+                    return get_with_token(client, key, &api_key, mode).await;
                 }
                 if err.starts_with("device-encrypted") {
-                    return fetch_and_decrypt(client, key).await;
+                    return fetch_and_decrypt(client, key, mode).await;
                 }
                 // Key expired/invalid or insufficient scope — escalate to session token
                 if status == 401 {
@@ -139,30 +206,30 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
                     if status.as_u16() == 403 {
                         let b: serde_json::Value =
                             serde_json::from_str(&body_text).unwrap_or_default();
-                        if b["error"]
-                            .as_str()
+                        if b.get("error")
+                            .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .starts_with("device-encrypted")
                         {
-                            return fetch_and_decrypt(client, key).await;
+                            return fetch_and_decrypt(client, key, mode).await;
                         }
                     }
                     if !status.is_success() {
                         bail!("server returned {status}: {body_text}");
                     }
-                    print!("{body_text}");
+                    emit_secret(key, &body_text, mode)?;
                     return Ok(());
                 }
                 if had_session_token && status == 403 {
                     // Session token expired AND key is valid (scope error) — use approval flow
-                    return get_with_token(client, key, &api_key).await;
+                    return get_with_token(client, key, &api_key, mode).await;
                 }
                 // No usable session token: prompt for one
                 let resp = client
                     .request_bearer(Method::GET, &path, None::<&()>)
                     .await?;
                 let body = Client::expect_success(resp).await?;
-                print!("{body}");
+                emit_secret(key, &body, mode)?;
                 return Ok(());
             }
             s => bail!("unexpected status {s}"),
@@ -176,21 +243,27 @@ pub async fn get(client: &mut Client, key: &str, token: Option<String>) -> Resul
     if resp.status().as_u16() == 403 {
         let body: serde_json::Value =
             serde_json::from_str(&resp.text().await.unwrap_or_default()).unwrap_or_default();
-        if body["error"]
-            .as_str()
+        if body
+            .get("error")
+            .and_then(|v| v.as_str())
             .unwrap_or("")
             .starts_with("device-encrypted")
         {
-            return fetch_and_decrypt(client, key).await;
+            return fetch_and_decrypt(client, key, mode).await;
         }
-        bail!("{}", body["error"].as_str().unwrap_or("forbidden"));
+        bail!(
+            "{}",
+            body.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("forbidden")
+        );
     }
     let body = Client::expect_success(resp).await?;
-    print!("{body}");
+    emit_secret(key, &body, mode)?;
     Ok(())
 }
 
-async fn fetch_and_decrypt(client: &mut Client, key: &str) -> Result<()> {
+async fn fetch_and_decrypt(client: &mut Client, key: &str, mode: SecretDisplay) -> Result<()> {
     let device_id = client.cfg.device_id.clone().ok_or_else(|| {
         anyhow::anyhow!("key is device-encrypted; run `kv device register` first")
     })?;
@@ -216,7 +289,7 @@ async fn fetch_and_decrypt(client: &mut Client, key: &str) -> Result<()> {
         &payload.aad,
     )?;
 
-    print!("{}", String::from_utf8_lossy(&plaintext));
+    emit_secret(key, &String::from_utf8_lossy(&plaintext), mode)?;
     Ok(())
 }
 
@@ -247,22 +320,33 @@ fn print_emojis(emojis: &str) {
     eprintln!();
 }
 
-async fn get_with_token(client: &Client, key: &str, api_key: &str) -> Result<()> {
+async fn get_with_token(
+    client: &Client,
+    key: &str,
+    api_key: &str,
+    mode: SecretDisplay,
+) -> Result<()> {
     let path = format!("/kv/{}", urlencoding(key));
 
     // First try: maybe already approved or open
     let resp = client.get_with_api_key(&path, api_key).await?;
     match resp.status().as_u16() {
         200 => {
-            print!("{}", resp.text().await.unwrap_or_default());
+            let body = resp.text().await.unwrap_or_default();
+            emit_secret(key, &body, mode)?;
             return Ok(());
         }
         401 => bail!("link expired or already used"),
         403 => {
             let body: serde_json::Value =
                 serde_json::from_str(&resp.text().await.unwrap_or_default()).unwrap_or_default();
-            if body["error"].as_str() != Some("pending approval") {
-                bail!("{}", body["error"].as_str().unwrap_or("access denied"));
+            if body.get("error").and_then(|v| v.as_str()) != Some("pending approval") {
+                bail!(
+                    "{}",
+                    body.get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("access denied")
+                );
             }
             // Fall through to approval flow
         }
@@ -281,7 +365,8 @@ async fn get_with_token(client: &Client, key: &str, api_key: &str) -> Result<()>
         match resp.status().as_u16() {
             200 => {
                 eprintln!("✅  Approved!");
-                print!("{}", resp.text().await.unwrap_or_default());
+                let body = resp.text().await.unwrap_or_default();
+                emit_secret(key, &body, mode)?;
                 return Ok(());
             }
             401 => bail!("link expired"),
@@ -337,13 +422,10 @@ async fn set_device_encrypted(client: &mut Client, key: &str, plaintext: &[u8]) 
     let device_tuples: Vec<(String, String, String)> = selected
         .iter()
         .map(|&i| {
-            (
-                devices[i].id.clone(),
-                devices[i].key_type.clone(),
-                devices[i].public_key.clone(),
-            )
+            let d = devices.get(i).context("fzf selection index out of range")?;
+            Ok::<_, anyhow::Error>((d.id.clone(), d.key_type.clone(), d.public_key.clone()))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let aad = format!("device-kv:{key}");
     let payload = crate::crypto::encrypt_for_devices(&aad, plaintext, &device_tuples)?;
@@ -414,7 +496,12 @@ pub async fn pick_key(client: &mut Client) -> Result<String> {
     }
     let lines: Vec<String> = entries.iter().map(|e| e.key.clone()).collect();
     let selected = crate::fzf::select(&lines, false, "Select key > ")?;
-    Ok(entries[selected[0]].key.clone())
+    let idx = *selected.first().context("fzf returned no selection")?;
+    Ok(entries
+        .get(idx)
+        .context("fzf selection index out of range")?
+        .key
+        .clone())
 }
 
 fn urlencoding(s: &str) -> String {
