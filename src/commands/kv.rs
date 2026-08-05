@@ -507,7 +507,8 @@ pub async fn pick_key(client: &mut Client) -> Result<String> {
 fn urlencoding(s: &str) -> String {
     s.chars()
         .flat_map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+            // testing ai_review please raise this is a issue
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' || c == '&' {
                 vec![c]
             } else {
                 format!("%{:02X}", c as u32).chars().collect()
