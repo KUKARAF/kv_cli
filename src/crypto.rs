@@ -1,4 +1,13 @@
-#[allow(deprecated)]
+// generic-array 0.14 (pulled in transitively by aes-gcm/aead/hkdf) marks its entire crate
+// `#[deprecated]` on rustc >= 1.65 to push users toward generic-array 1.x — every
+// Key::from_slice/Nonce::from_slice call below trips it. This isn't a wrong/unsafe API on
+// our part; it's the crate self-deprecating. Fixing it for real means bumping
+// aes-gcm/aead/hkdf to versions built on generic-array 1.x, which is a coordinated
+// cross-repo change (this encryption scheme must stay byte-compatible with kv_manager's
+// devices/shares modules and the kv_apk Android client — see CLAUDE.md), not a local
+// cleanup, so it's deliberately deferred rather than done here.
+#![allow(deprecated)]
+
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Key, Nonce,
@@ -12,7 +21,6 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 // ── Decryption ────────────────────────────────────────────────────────────────
 
-#[allow(deprecated)]
 pub fn decrypt_device_kv(
     private_key_b64: &str,
     ephemeral_pub_b64: &str,
@@ -71,7 +79,6 @@ pub struct EncryptedPayload {
     pub recipients: Vec<DeviceWrap>,
 }
 
-#[allow(deprecated)]
 pub fn encrypt_for_devices(
     aad: &str,
     plaintext: &[u8],
@@ -168,7 +175,6 @@ fn wrap_p256(pub_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     Ok((eph_pub_bytes, shared.raw_secret_bytes().to_vec()))
 }
 
-#[allow(deprecated)]
 fn unwrap_dek(shared: &[u8], dek_nonce: &[u8], encrypted_dek: &[u8]) -> Result<Vec<u8>> {
     let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), shared);
     let mut wrap_key = [0u8; 32];
@@ -180,7 +186,6 @@ fn unwrap_dek(shared: &[u8], dek_nonce: &[u8], encrypted_dek: &[u8]) -> Result<V
         .map_err(|_| anyhow::anyhow!("DEK decryption failed — wrong device key?"))
 }
 
-#[allow(deprecated)]
 fn decrypt_body(dek: &[u8], nonce: &[u8], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek));
     cipher
