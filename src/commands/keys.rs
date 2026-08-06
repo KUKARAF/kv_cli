@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tabled::{Table, Tabled};
 
 use crate::client::Client;
+use crate::secret_display::{emit_secret, SecretDisplay};
 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
@@ -63,6 +64,7 @@ pub async fn create(
     label: String,
     key_type: String,
     scopes_raw: Vec<String>,
+    mode: SecretDisplay,
 ) -> Result<()> {
     let scopes = parse_scopes(&scopes_raw)?;
     let body = CreateKeyRequest {
@@ -77,7 +79,7 @@ pub async fn create(
     let body_str = Client::expect_success(resp).await?;
     // Server returns JSON with `key` field or just the raw key string
     let key = extract_key_from_response(&body_str);
-    println!("{key}");
+    emit_secret("a new API key was created", &key, mode, None)?;
     eprintln!("⚠  Copy this key now — it will not be shown again.");
     Ok(())
 }

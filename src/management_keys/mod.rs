@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tabled::{Table, Tabled};
 
 use crate::client::Client;
+use crate::secret_display::{emit_secret, SecretDisplay};
 
 // ── Wire types ────────────────────────────────────────────────────────────────
 
@@ -330,6 +331,7 @@ pub async fn keys_create(
     label: &str,
     limit: Option<f64>,
     limit_reset: Option<String>,
+    mode: SecretDisplay,
 ) -> Result<()> {
     validate_limit_reset(&limit_reset)?;
     let mgmt_key = decrypt_management_key(client, mgmt_key_id).await?;
@@ -351,7 +353,12 @@ pub async fn keys_create(
         created.label,
         created.provider_key_id
     );
-    eprintln!("Secret (shown once): {}", created.plaintext_secret);
+    emit_secret(
+        "a new provisioned key was created (shown once)",
+        &created.plaintext_secret,
+        mode,
+        None,
+    )?;
     eprintln!("Stored encrypted as {}", stored_id);
     Ok(())
 }
@@ -445,6 +452,7 @@ pub async fn keys_rotate(
     client: &mut Client,
     mgmt_key_id: &str,
     provider_key_id: &str,
+    mode: SecretDisplay,
 ) -> Result<()> {
     let mgmt_key = decrypt_management_key(client, mgmt_key_id).await?;
     let row = management_key_row(client, mgmt_key_id).await?;
@@ -492,7 +500,12 @@ pub async fn keys_rotate(
         created.label,
         created.provider_key_id
     );
-    eprintln!("Secret (shown once): {}", created.plaintext_secret);
+    emit_secret(
+        "the rotated key was created (shown once)",
+        &created.plaintext_secret,
+        mode,
+        None,
+    )?;
     eprintln!("Stored encrypted as {}", stored_id);
     Ok(())
 }
@@ -501,12 +514,16 @@ pub async fn keys_show(
     client: &mut Client,
     mgmt_key_id: &str,
     provisioned_key_id: &str,
+    mode: SecretDisplay,
 ) -> Result<()> {
     let device_id = local_device_id(client)?;
     let priv_key_b64 = crate::commands::device::load_private_key_b64()?;
 
     let path = format!(
-        "/api/admin/management-keys/{mgmt_key_id}/provisioned-keys/{provisioned_key_id}/devices/{device_id}"
+        "/api/admin/management-keys/{}/provisioned-keys/{}/devices/{}",
+        crate::urlencode::urlencode(mgmt_key_id),
+        crate::urlencode::urlencode(provisioned_key_id),
+        crate::urlencode::urlencode(&device_id),
     );
     let resp = client
         .request_bearer(Method::GET, &path, None::<&()>)
@@ -524,6 +541,13 @@ pub async fn keys_show(
         &payload.ciphertext,
         &payload.aad,
     )?;
-    print!("{}", String::from_utf8_lossy(&plaintext));
+    emit_secret(
+        "provisioned key retrieved",
+        &String::from_utf8_lossy(&plaintext),
+        mode,
+        Some(&format!(
+            "kv mgmt-key keys show {mgmt_key_id} {provisioned_key_id}"
+        )),
+    )?;
     Ok(())
 }

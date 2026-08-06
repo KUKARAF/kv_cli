@@ -5,6 +5,8 @@ mod config;
 mod crypto;
 mod fzf;
 mod management_keys;
+mod secret_display;
+mod urlencode;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -106,6 +108,15 @@ enum KeysCmd {
         /// KV keys this token may access, repeatable
         #[arg(long = "allow-key", value_name = "KEY")]
         allowed_keys: Vec<String>,
+        /// If this looks like an agent creating a key, print its SHA-256 hash instead of the raw value
+        #[arg(long)]
+        return_md5_on_agent_true: bool,
+        /// If this looks like an agent creating a key, print only the last 3 characters instead of the raw value
+        #[arg(long)]
+        show_3_last_digits_on_agent_true: bool,
+        /// Print the raw new key even if this looks like a direct agent invocation
+        #[arg(long)]
+        dangerously_show_content_on_agent_true: bool,
     },
     /// Revoke an API key by ID
     Revoke { id: String },
@@ -181,6 +192,15 @@ enum MgmtKeyKeysCmd {
         /// Limit reset cadence: daily, weekly, or monthly (overrides the management key's default)
         #[arg(long)]
         limit_reset: Option<String>,
+        /// If this looks like an agent creating a key, print its SHA-256 hash instead of the raw value
+        #[arg(long)]
+        return_md5_on_agent_true: bool,
+        /// If this looks like an agent creating a key, print only the last 3 characters instead of the raw value
+        #[arg(long)]
+        show_3_last_digits_on_agent_true: bool,
+        /// Print the raw new key even if this looks like a direct agent invocation
+        #[arg(long)]
+        dangerously_show_content_on_agent_true: bool,
     },
     /// Revoke a key on the provider
     Revoke {
@@ -195,6 +215,15 @@ enum MgmtKeyKeysCmd {
         mgmt_key_id: String,
         /// The provider's key id (as shown by `keys list`)
         provider_key_id: String,
+        /// If this looks like an agent rotating a key, print its SHA-256 hash instead of the raw value
+        #[arg(long)]
+        return_md5_on_agent_true: bool,
+        /// If this looks like an agent rotating a key, print only the last 3 characters instead of the raw value
+        #[arg(long)]
+        show_3_last_digits_on_agent_true: bool,
+        /// Print the raw rotated key even if this looks like a direct agent invocation
+        #[arg(long)]
+        dangerously_show_content_on_agent_true: bool,
     },
     /// Decrypt and reprint a previously generated key's plaintext
     Show {
@@ -202,6 +231,15 @@ enum MgmtKeyKeysCmd {
         mgmt_key_id: String,
         /// Our stored provisioned-key id (not the provider's id)
         provisioned_key_id: String,
+        /// If this looks like an agent reading a secret directly, print its SHA-256 hash instead of the raw value
+        #[arg(long)]
+        return_md5_on_agent_true: bool,
+        /// If this looks like an agent reading a secret directly, print only the last 3 characters instead of the raw value
+        #[arg(long)]
+        show_3_last_digits_on_agent_true: bool,
+        /// Print the raw secret value even if this looks like a direct agent invocation
+        #[arg(long)]
+        dangerously_show_content_on_agent_true: bool,
     },
 }
 
@@ -240,7 +278,7 @@ async fn run() -> Result<()> {
     }
 
     let cfg = Config::load()?;
-    let mut client = Client::new(cfg, cli.base_url, cli.silent);
+    let mut client = Client::new(cfg, cli.base_url, cli.silent)?;
 
     match cli.command {
         Cmd::Get {
@@ -254,7 +292,7 @@ async fn run() -> Result<()> {
                 Some(k) => k,
                 None => commands::kv::pick_key(&mut client).await?,
             };
-            let display = commands::kv::SecretDisplay {
+            let display = secret_display::SecretDisplay {
                 md5: return_md5_on_agent_true,
                 last3: show_3_last_digits_on_agent_true,
                 dangerously_show: dangerously_show_content_on_agent_true,
@@ -283,7 +321,13 @@ async fn run() -> Result<()> {
         }
         Cmd::AddApiToken { token } => {
             let key = match token {
-                Some(t) => t,
+                Some(t) => {
+                    eprintln!(
+                        "warning: passing the API key as a CLI argument may leak it via shell \
+                         history or process listings (ps) — omit it to be prompted securely instead"
+                    );
+                    t
+                }
                 None => {
                     rpassword::prompt_password("API key: ").context("failed to read API key")?
                 }
@@ -300,8 +344,16 @@ async fn run() -> Result<()> {
                 label,
                 r#type,
                 allowed_keys,
+                return_md5_on_agent_true,
+                show_3_last_digits_on_agent_true,
+                dangerously_show_content_on_agent_true,
             } => {
-                commands::keys::create(&mut client, label, r#type, allowed_keys).await?;
+                let display = secret_display::SecretDisplay {
+                    md5: return_md5_on_agent_true,
+                    last3: show_3_last_digits_on_agent_true,
+                    dangerously_show: dangerously_show_content_on_agent_true,
+                };
+                commands::keys::create(&mut client, label, r#type, allowed_keys, display).await?;
             }
             KeysCmd::Revoke { id } => {
                 commands::keys::revoke(&mut client, &id).await?;
@@ -376,13 +428,22 @@ async fn run() -> Result<()> {
                     label,
                     limit,
                     limit_reset,
+                    return_md5_on_agent_true,
+                    show_3_last_digits_on_agent_true,
+                    dangerously_show_content_on_agent_true,
                 } => {
+                    let display = secret_display::SecretDisplay {
+                        md5: return_md5_on_agent_true,
+                        last3: show_3_last_digits_on_agent_true,
+                        dangerously_show: dangerously_show_content_on_agent_true,
+                    };
                     management_keys::keys_create(
                         &mut client,
                         &mgmt_key_id,
                         &label,
                         limit,
                         limit_reset,
+                        display,
                     )
                     .await?;
                 }
@@ -396,16 +457,42 @@ async fn run() -> Result<()> {
                 MgmtKeyKeysCmd::Rotate {
                     mgmt_key_id,
                     provider_key_id,
+                    return_md5_on_agent_true,
+                    show_3_last_digits_on_agent_true,
+                    dangerously_show_content_on_agent_true,
                 } => {
-                    management_keys::keys_rotate(&mut client, &mgmt_key_id, &provider_key_id)
-                        .await?;
+                    let display = secret_display::SecretDisplay {
+                        md5: return_md5_on_agent_true,
+                        last3: show_3_last_digits_on_agent_true,
+                        dangerously_show: dangerously_show_content_on_agent_true,
+                    };
+                    management_keys::keys_rotate(
+                        &mut client,
+                        &mgmt_key_id,
+                        &provider_key_id,
+                        display,
+                    )
+                    .await?;
                 }
                 MgmtKeyKeysCmd::Show {
                     mgmt_key_id,
                     provisioned_key_id,
+                    return_md5_on_agent_true,
+                    show_3_last_digits_on_agent_true,
+                    dangerously_show_content_on_agent_true,
                 } => {
-                    management_keys::keys_show(&mut client, &mgmt_key_id, &provisioned_key_id)
-                        .await?;
+                    let display = secret_display::SecretDisplay {
+                        md5: return_md5_on_agent_true,
+                        last3: show_3_last_digits_on_agent_true,
+                        dangerously_show: dangerously_show_content_on_agent_true,
+                    };
+                    management_keys::keys_show(
+                        &mut client,
+                        &mgmt_key_id,
+                        &provisioned_key_id,
+                        display,
+                    )
+                    .await?;
                 }
             },
         },

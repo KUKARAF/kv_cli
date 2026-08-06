@@ -18,6 +18,7 @@ use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 // ── Decryption ────────────────────────────────────────────────────────────────
 
@@ -30,12 +31,13 @@ pub fn decrypt_device_kv(
     ciphertext_b64: &str,
     aad_b64: &str,
 ) -> Result<Vec<u8>> {
-    let priv_bytes: [u8; 32] = B64
-        .decode(private_key_b64.trim())
-        .context("invalid private key encoding")?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("device key must be 32 bytes"))?;
-    let secret = StaticSecret::from(priv_bytes);
+    let priv_bytes: Zeroizing<[u8; 32]> = Zeroizing::new(
+        B64.decode(private_key_b64.trim())
+            .context("invalid private key encoding")?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("device key must be 32 bytes"))?,
+    );
+    let secret = StaticSecret::from(*priv_bytes);
 
     let eph_bytes: [u8; 32] = B64
         .decode(ephemeral_pub_b64)
@@ -46,11 +48,11 @@ pub fn decrypt_device_kv(
 
     let shared = secret.diffie_hellman(&eph_pub);
 
-    let dek = unwrap_dek(
+    let dek: Zeroizing<Vec<u8>> = Zeroizing::new(unwrap_dek(
         shared.as_bytes(),
         &B64.decode(dek_nonce_b64)?,
         &B64.decode(encrypted_dek_b64)?,
-    )?;
+    )?);
 
     let body_nonce = B64
         .decode(body_nonce_b64)
@@ -90,15 +92,15 @@ pub fn encrypt_for_devices(
 
     let mut rng = OsRng;
 
-    let mut dek = [0u8; 32];
-    rng.fill_bytes(&mut dek);
+    let mut dek: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+    rng.fill_bytes(&mut *dek);
 
     let mut body_nonce = [0u8; 12];
     rng.fill_bytes(&mut body_nonce);
 
     let aad_bytes = aad.as_bytes();
 
-    let body_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&dek));
+    let body_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*dek));
     let ciphertext = body_cipher
         .encrypt(
             Nonce::from_slice(&body_nonce),
@@ -119,16 +121,17 @@ pub fn encrypt_for_devices(
             "p256" => wrap_p256(&pub_bytes)?,
             other => anyhow::bail!("unsupported key type: {other}"),
         };
+        let shared_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(shared_bytes);
 
         let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), &shared_bytes);
-        let mut wrap_key = [0u8; 32];
-        hk.expand(b"kv-device-wrap", &mut wrap_key)
+        let mut wrap_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+        hk.expand(b"kv-device-wrap", &mut *wrap_key)
             .map_err(|_| anyhow::anyhow!("HKDF expand failed"))?;
 
         let mut dek_nonce = [0u8; 12];
         rng.fill_bytes(&mut dek_nonce);
 
-        let wrap_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&wrap_key));
+        let wrap_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*wrap_key));
         let encrypted_dek = wrap_cipher
             .encrypt(Nonce::from_slice(&dek_nonce), dek.as_ref())
             .map_err(|_| anyhow::anyhow!("DEK encryption failed"))?;
@@ -177,10 +180,10 @@ fn wrap_p256(pub_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 
 fn unwrap_dek(shared: &[u8], dek_nonce: &[u8], encrypted_dek: &[u8]) -> Result<Vec<u8>> {
     let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), shared);
-    let mut wrap_key = [0u8; 32];
-    hk.expand(b"kv-device-wrap", &mut wrap_key)
+    let mut wrap_key: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+    hk.expand(b"kv-device-wrap", &mut *wrap_key)
         .map_err(|_| anyhow::anyhow!("HKDF expand failed"))?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&wrap_key));
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*wrap_key));
     cipher
         .decrypt(Nonce::from_slice(dek_nonce), encrypted_dek)
         .map_err(|_| anyhow::anyhow!("DEK decryption failed — wrong device key?"))

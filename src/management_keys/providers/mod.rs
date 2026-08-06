@@ -37,7 +37,7 @@ pub trait ManagementKeyProvider {
 
 pub fn provider_for(name: &str) -> Result<Box<dyn ManagementKeyProvider>> {
     match name {
-        "openrouter" => Ok(Box::new(openrouter::OpenRouterProvider::new())),
+        "openrouter" => Ok(Box::new(openrouter::OpenRouterProvider::new()?)),
         other => bail!("unsupported management key provider: {other}"),
     }
 }

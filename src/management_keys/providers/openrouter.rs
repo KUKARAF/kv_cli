@@ -2,6 +2,7 @@ use super::{ManagementKeyProvider, ProviderKeyCreated, ProviderKeyInfo};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::time::Duration;
 
 // https://openrouter.ai/docs/features/provisioning-api-keys
 const BASE_URL: &str = "https://openrouter.ai/api/v1/keys";
@@ -11,10 +12,12 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-    pub fn new() -> Self {
-        Self {
-            http: reqwest::Client::new(),
-        }
+    pub fn new() -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("failed to build HTTP client")?;
+        Ok(Self { http })
     }
 }
 
@@ -99,7 +102,10 @@ impl ManagementKeyProvider for OpenRouterProvider {
         management_key: &str,
         provider_key_id: &str,
     ) -> Result<ProviderKeyInfo> {
-        let url = format!("{BASE_URL}/{provider_key_id}");
+        let url = format!(
+            "{BASE_URL}/{}",
+            crate::urlencode::urlencode(provider_key_id)
+        );
         let resp = self
             .http
             .get(&url)
@@ -140,7 +146,10 @@ impl ManagementKeyProvider for OpenRouterProvider {
         // Per OpenRouter's docs, `limit_reset` is only documented on the update (PATCH)
         // endpoint, not on create — so applying a reset cadence takes a follow-up call.
         if let Some(reset) = limit_reset {
-            let update_url = format!("{BASE_URL}/{}", parsed.data.hash);
+            let update_url = format!(
+                "{BASE_URL}/{}",
+                crate::urlencode::urlencode(&parsed.data.hash)
+            );
             let resp = self
                 .http
                 .patch(&update_url)
@@ -160,7 +169,10 @@ impl ManagementKeyProvider for OpenRouterProvider {
     }
 
     async fn revoke_key(&self, management_key: &str, provider_key_id: &str) -> Result<()> {
-        let url = format!("{BASE_URL}/{provider_key_id}");
+        let url = format!(
+            "{BASE_URL}/{}",
+            crate::urlencode::urlencode(provider_key_id)
+        );
         let resp = self
             .http
             .delete(&url)

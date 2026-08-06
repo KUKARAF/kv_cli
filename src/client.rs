@@ -44,15 +44,31 @@ struct SessionRequestStatus {
 }
 
 impl Client {
-    pub fn new(cfg: Config, base_url_override: Option<String>, silent: bool) -> Self {
+    pub fn new(cfg: Config, base_url_override: Option<String>, silent: bool) -> Result<Self> {
         let base_url = base_url_override.unwrap_or_else(|| cfg.base_url().to_string());
         let base_url = base_url.trim_end_matches('/').to_string();
-        Self {
+
+        if !base_url.starts_with("https://")
+            && !base_url.starts_with("http://localhost")
+            && !base_url.starts_with("http://127.0.0.1")
+        {
+            eprintln!(
+                "warning: base URL '{base_url}' is not https — session tokens and API keys \
+                 will be sent in cleartext"
+            );
+        }
+
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("failed to build HTTP client")?;
+
+        Ok(Self {
             cfg,
             base_url,
             silent,
-            http: reqwest::Client::new(),
-        }
+            http,
+        })
     }
 
     /// Check if the stored session token is valid without prompting.
@@ -113,7 +129,8 @@ impl Client {
 
         let status_path = format!(
             "/api/session-request/{}/status?secret={}",
-            created.id, created.poll_secret
+            crate::urlencode::urlencode(&created.id),
+            crate::urlencode::urlencode(&created.poll_secret)
         );
         let mut ticker = interval(Duration::from_secs(5));
         ticker.tick().await;

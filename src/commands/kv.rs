@@ -5,6 +5,7 @@ use tabled::{Table, Tabled};
 use tokio::time::{interval, Duration};
 
 use crate::client::Client;
+use crate::secret_display::{emit_secret, SecretDisplay};
 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
@@ -85,65 +86,13 @@ fn opt_f64(v: &Option<f64>) -> String {
     v.map(|f| f.to_string()).unwrap_or_else(|| "-".to_string())
 }
 
-// ── Agent nudge ───────────────────────────────────────────────────────────────
-
-/// How to display a secret once retrieved. Set from `kv get`'s
-/// `--return-md5-on-agent-true` / `--show-3-last-digits-on-agent-true` /
-/// `--dangerously-show-content-on-agent-true` flags.
-#[derive(Clone, Copy, Default)]
-pub struct SecretDisplay {
-    pub md5: bool,
-    pub last3: bool,
-    pub dangerously_show: bool,
-}
-
-/// Prints `value` for key `key` according to `mode`, unless it looks like an
-/// agent is reading the secret directly (see `agent_detect`), in which case
-/// it prints a nudge to stderr instead of the raw value. This is a UX nudge,
-/// not a security control — see `agent_detect` for why it can't be one.
-fn emit_secret(key: &str, value: &str, mode: SecretDisplay) -> Result<()> {
-    if mode.dangerously_show || !crate::agent_detect::should_nudge() {
-        print!("{value}");
-        return Ok(());
-    }
-
-    if mode.md5 {
-        use md5::{Digest, Md5};
-        let hash = Md5::digest(value.as_bytes());
-        println!("{hash:x}");
-        return Ok(());
-    }
-
-    if mode.last3 {
-        let tail: String = {
-            let mut chars: Vec<char> = value.chars().rev().take(3).collect();
-            chars.reverse();
-            chars.into_iter().collect()
-        };
-        println!("...{tail}");
-        return Ok(());
-    }
-
-    eprintln!("success: the key '{key}' exists in the kv store!");
-    eprintln!();
-    eprintln!("Its raw value isn't being printed here because this looks like an AI agent");
-    eprintln!("running `kv get {key}` directly — printing it would put the secret into the");
-    eprintln!("model's context and could leak it to the model provider. If you just want to");
-    eprintln!("confirm the key/value without leaking it, use one of:");
-    eprintln!();
-    eprintln!("  kv get {key} --show-3-last-digits-on-agent-true");
-    eprintln!("  kv get {key} --return-md5-on-agent-true");
-    eprintln!();
-    eprintln!("If this is a false positive, or you've built a safeguard elsewhere to make sure");
-    eprintln!("the value won't reach the model (e.g. it's consumed entirely within a script),");
-    eprintln!("force the raw value with:");
-    eprintln!();
-    eprintln!("  kv get {key} --dangerously-show-content-on-agent-true");
-    eprintln!();
-    eprintln!("Note: using the value inside another command, e.g.");
-    eprintln!("  curl -H \"Authorization: Bearer $(kv get {key})\" https://example.com");
-    eprintln!("does not trigger this message.");
-    anyhow::bail!("refusing to print secret directly to a detected agent invocation");
+fn emit_kv_secret(key: &str, value: &str, mode: SecretDisplay) -> Result<()> {
+    emit_secret(
+        &format!("the key '{key}' exists in the kv store"),
+        value,
+        mode,
+        Some(&format!("kv get {key}")),
+    )
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -154,7 +103,7 @@ pub async fn get(
     token: Option<String>,
     mode: SecretDisplay,
 ) -> Result<()> {
-    let path = format!("/kv/{}", urlencoding(key));
+    let path = format!("/kv/{}", crate::urlencode::urlencode(key));
 
     if let Some(api_key) = token {
         // Explicit --token: approval-required / one-time flow
@@ -167,7 +116,7 @@ pub async fn get(
         match resp.status().as_u16() {
             200 => {
                 let body = resp.text().await.unwrap_or_default();
-                emit_secret(key, &body, mode)?;
+                emit_kv_secret(key, &body, mode)?;
                 return Ok(());
             }
             401 | 403 => {
@@ -217,7 +166,7 @@ pub async fn get(
                     if !status.is_success() {
                         bail!("server returned {status}: {body_text}");
                     }
-                    emit_secret(key, &body_text, mode)?;
+                    emit_kv_secret(key, &body_text, mode)?;
                     return Ok(());
                 }
                 if had_session_token && status == 403 {
@@ -229,7 +178,7 @@ pub async fn get(
                     .request_bearer(Method::GET, &path, None::<&()>)
                     .await?;
                 let body = Client::expect_success(resp).await?;
-                emit_secret(key, &body, mode)?;
+                emit_kv_secret(key, &body, mode)?;
                 return Ok(());
             }
             s => bail!("unexpected status {s}"),
@@ -259,7 +208,7 @@ pub async fn get(
         );
     }
     let body = Client::expect_success(resp).await?;
-    emit_secret(key, &body, mode)?;
+    emit_kv_secret(key, &body, mode)?;
     Ok(())
 }
 
@@ -270,7 +219,11 @@ async fn fetch_and_decrypt(client: &mut Client, key: &str, mode: SecretDisplay) 
 
     let priv_key_b64 = crate::commands::device::load_private_key_b64()?;
 
-    let path = format!("/api/admin/devices/{}/kv/{}", device_id, urlencoding(key));
+    let path = format!(
+        "/api/admin/devices/{}/kv/{}",
+        device_id,
+        crate::urlencode::urlencode(key)
+    );
     let resp = client
         .request_bearer(Method::GET, &path, None::<&()>)
         .await?;
@@ -289,7 +242,7 @@ async fn fetch_and_decrypt(client: &mut Client, key: &str, mode: SecretDisplay) 
         &payload.aad,
     )?;
 
-    emit_secret(key, &String::from_utf8_lossy(&plaintext), mode)?;
+    emit_kv_secret(key, &String::from_utf8_lossy(&plaintext), mode)?;
     Ok(())
 }
 
@@ -326,14 +279,14 @@ async fn get_with_token(
     api_key: &str,
     mode: SecretDisplay,
 ) -> Result<()> {
-    let path = format!("/kv/{}", urlencoding(key));
+    let path = format!("/kv/{}", crate::urlencode::urlencode(key));
 
     // First try: maybe already approved or open
     let resp = client.get_with_api_key(&path, api_key).await?;
     match resp.status().as_u16() {
         200 => {
             let body = resp.text().await.unwrap_or_default();
-            emit_secret(key, &body, mode)?;
+            emit_kv_secret(key, &body, mode)?;
             return Ok(());
         }
         401 => bail!("link expired or already used"),
@@ -366,7 +319,7 @@ async fn get_with_token(
             200 => {
                 eprintln!("✅  Approved!");
                 let body = resp.text().await.unwrap_or_default();
-                emit_secret(key, &body, mode)?;
+                emit_kv_secret(key, &body, mode)?;
                 return Ok(());
             }
             401 => bail!("link expired"),
@@ -387,7 +340,7 @@ pub async fn set(
     if device {
         return set_device_encrypted(client, key, value.as_bytes()).await;
     }
-    let path = format!("/kv/{}", urlencoding(key));
+    let path = format!("/kv/{}", crate::urlencode::urlencode(key));
     let body = KvUpsertRequest {
         value,
         ttl_hours,
@@ -459,7 +412,7 @@ async fn set_device_encrypted(client: &mut Client, key: &str, plaintext: &[u8]) 
 
 pub async fn list(client: &mut Client, prefix: Option<String>) -> Result<()> {
     let path = match &prefix {
-        Some(p) => format!("/kv?prefix={}", urlencoding(p)),
+        Some(p) => format!("/kv?prefix={}", crate::urlencode::urlencode(p)),
         None => "/kv".to_string(),
     };
     let resp = client
@@ -476,7 +429,7 @@ pub async fn list(client: &mut Client, prefix: Option<String>) -> Result<()> {
 }
 
 pub async fn delete(client: &mut Client, key: &str) -> Result<()> {
-    let path = format!("/kv/{}", urlencoding(key));
+    let path = format!("/kv/{}", crate::urlencode::urlencode(key));
     let resp = client
         .request_bearer(Method::DELETE, &path, None::<&()>)
         .await?;
@@ -502,17 +455,4 @@ pub async fn pick_key(client: &mut Client) -> Result<String> {
         .context("fzf selection index out of range")?
         .key
         .clone())
-}
-
-fn urlencoding(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| {
-            // testing ai_review please raise this is a issue
-            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' || c == '&' {
-                vec![c]
-            } else {
-                format!("%{:02X}", c as u32).chars().collect()
-            }
-        })
-        .collect()
 }
