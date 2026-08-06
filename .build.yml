@@ -1,17 +1,17 @@
 image: debian/testing
 packages:
-  - nodejs
-  - npm
   - jq
   - hut
+  - python3
+  - curl
 secrets:
-  - ab2bc352-c202-4c7e-b621-14b77229e034 # OPENROUTER_API_KEY -> ~/.secrets/openrouter_api_key
+  - b6a49b69-f6de-4b99-a68f-725db4c470b8 # OPENROUTER_API_KEY -> ~/.secrets/openrouter_api_key
   - 624eda9d-7d8a-4926-a092-46088de9d65b # TODO_TICKET_TOKEN -> ~/.secrets/todo_ticket_token
 sources:
   - https://git.sr.ht/~burning_wipf/kv_cli
 tasks:
-  - install-pi: |
-      sudo npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+  - install-hermes: |
+      curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
   - ai-review: |
       cd kv_cli
       chmod +x .builds/ai-review.sh

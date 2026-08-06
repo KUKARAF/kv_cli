@@ -1,9 +1,11 @@
 #!/bin/bash
 # Runs on every push (via .build.yml). Reviews the diff since the last
-# reviewed commit with `pi` (read-only, no bash/write/network tools — it can
-# only inspect files and emit findings) and files each finding as a ticket on
-# TRACKER via `hut`, the only thing in this script with write access to
-# anything. State (the last-reviewed SHA) lives as a comment thread on a
+# reviewed commit with `hermes` running the code-review skill. hermes writes
+# its findings to good.md/ticket.md (plain file writes — this is the only
+# thing it does that has any effect outside its own working directory) and
+# this wrapper script, never hermes itself, is the only thing that touches
+# `hut`/todo.sr.ht credentials: it reads ticket.md and files a ticket only if
+# non-empty. State (the last reviewed SHA) lives as a comment thread on a
 # pinned ticket in the same tracker — see #STATE_TICKET.
 set -euo pipefail
 
@@ -48,43 +50,35 @@ else
   export OPENROUTER_API_KEY
   OPENROUTER_API_KEY="$(cat "$HOME/.secrets/openrouter_api_key")"
 
+  mkdir -p "$HOME/.hermes/skills"
+  cp "$(dirname "$0")/code-review-skill.md" "$HOME/.hermes/skills/code-review.md"
+
+  rm -f good.md ticket.md
+
   PROMPT_FILE=$(mktemp)
   {
-    echo 'Review the following git diff for correctness bugs, security issues, and risky'
-    echo 'changes. Respond with ONLY a JSON array (no prose, no markdown fences) of'
-    echo 'objects: [{"title": string, "severity": "low"|"medium"|"high", "file": string,'
-    echo '"explanation": string}]. If nothing is worth flagging, respond with []. Diff:'
+    echo "/code-review"
+    echo
+    echo "Commit range $LAST_SHA..$CURRENT_SHA:"
     echo
     echo "$DIFF"
   } > "$PROMPT_FILE"
 
-  RAW=$(timeout 300 pi --mode json --approve --tools read,grep,find,ls --provider openrouter --model "$MODEL" \
-    "$(cat "$PROMPT_FILE")" </dev/null 2>/tmp/pi-stderr.log || true)
+  export PATH="$HOME/.hermes/hermes-agent/venv/bin:$PATH"
+  timeout 300 hermes chat -q "$(cat "$PROMPT_FILE")" \
+    --provider openrouter --model "$MODEL" \
+    --yolo --toolsets file \
+    </dev/null || echo "hermes exited non-zero — checking for a ticket.md anyway" >&2
+
   rm -f "$PROMPT_FILE"
 
-  FINAL_TEXT=$(echo "$RAW" \
-    | jq -c 'select(.type == "message_end" and .message.role == "assistant")' 2>/dev/null \
-    | tail -1 \
-    | jq -r '[.message.content[] | select(.type=="text") | .text] | join("\n")' 2>/dev/null || echo "")
-
-  FINDINGS_JSON=$(echo "$FINAL_TEXT" | grep -o '\[.*\]' | head -1 || true)
-  [ -z "$FINDINGS_JSON" ] && FINDINGS_JSON="[]"
-
-  if ! echo "$FINDINGS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    echo "pi output wasn't parseable JSON, skipping ticket filing this run. Raw stderr:" >&2
-    cat /tmp/pi-stderr.log >&2
-    FINDINGS_JSON="[]"
+  if [ -s ticket.md ]; then
+    hut todo ticket create -t "$TRACKER" < ticket.md
+  else
+    echo "ticket.md empty or absent — no findings this run"
   fi
 
-  echo "$FINDINGS_JSON" | jq -c '.[]' | while IFS= read -r finding; do
-    TITLE=$(echo "$finding" | jq -r '.title // "untitled finding"')
-    SEVERITY=$(echo "$finding" | jq -r '.severity // "unknown"')
-    FILE=$(echo "$finding" | jq -r '.file // "?"')
-    EXPLANATION=$(echo "$finding" | jq -r '.explanation // ""')
-    printf '[%s] %s (%s)\n\n%s\n\nCommit range: %s..%s\n' \
-      "$SEVERITY" "$TITLE" "$FILE" "$EXPLANATION" "$LAST_SHA" "$CURRENT_SHA" \
-      | hut todo ticket create -t "$TRACKER"
-  done
+  rm -f good.md ticket.md
 fi
 
 echo "state: last-reviewed-sha=$CURRENT_SHA" | hut todo ticket comment -t "$TRACKER" "$STATE_TICKET"
