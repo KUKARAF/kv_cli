@@ -35,9 +35,6 @@ struct SessionRequestCreated {
     /// Required to poll for the session token — proves the poller is the same party
     /// that created the request, not just someone who saw the id in the URL/QR.
     poll_secret: String,
-    /// Human-verifiable code to relay to whoever approves the request out-of-band —
-    /// approval is bound to this code, not just to clicking the right row.
-    confirm_code: String,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +44,11 @@ struct SessionRequestStatus {
     /// polls return `status: "delivered"` with `envelope: null`.
     #[serde(default)]
     envelope: Option<Envelope>,
+    /// Present while the request is still pending (`status != "approved"`),
+    /// re-fetchable on every poll. Same device-KV envelope scheme as `envelope`;
+    /// decrypts to the one-time approval token the human relays to the admin.
+    #[serde(default)]
+    approval_envelope: Option<Envelope>,
 }
 
 /// ECDH-wrapped session token — same envelope scheme as device-encrypted KV values
@@ -167,9 +169,8 @@ impl Client {
         print_qr(&created.url);
 
         eprintln!("  Open the URL or scan the QR code to approve.");
-        eprintln!("  Tell whoever approves this request the confirm code:");
-        eprintln!("  {}", created.confirm_code);
-        eprintln!("  (approval will fail without it — this proves the approval is for you)");
+        eprintln!("  An approval code will appear below shortly — relay it to whoever");
+        eprintln!("  approves this request (approval requires it, proving it's for you).");
         eprintln!("  Polling every 5s.  Press  Ctrl+C  to cancel.");
         eprintln!();
 
@@ -180,6 +181,10 @@ impl Client {
         );
         let mut ticker = interval(Duration::from_secs(5));
         ticker.tick().await;
+
+        // Print the relay-to-admin approval token only once, even though the
+        // server returns it on every pending poll.
+        let mut approval_shown = false;
 
         loop {
             ticker.tick().await;
@@ -208,28 +213,8 @@ impl Client {
                     let envelope = status.envelope.ok_or_else(|| {
                         anyhow::anyhow!("server approved but returned no envelope")
                     })?;
-                    // The CLI only ever registers an x25519 device key, so the envelope
-                    // wrapped for our device must be x25519. `decrypt_device_kv` is
-                    // x25519-only; guard against anything else rather than mis-decrypt.
-                    if envelope.recipient.key_type != "x25519" {
-                        bail!(
-                            "session token was wrapped for key type '{}', but this CLI's device \
-                             key is x25519 — cannot decrypt",
-                            envelope.recipient.key_type
-                        );
-                    }
-                    let priv_key_b64 = crate::commands::device::load_private_key_b64()?;
-                    let plaintext = crate::crypto::decrypt_device_kv(
-                        &priv_key_b64,
-                        &envelope.recipient.ephemeral_pub,
-                        &envelope.recipient.dek_nonce,
-                        &envelope.recipient.encrypted_dek,
-                        &envelope.nonce,
-                        &envelope.ciphertext,
-                        &envelope.aad,
-                    )?;
-                    let token = String::from_utf8(plaintext)
-                        .context("decrypted session token is not valid UTF-8")?;
+                    let token = Self::decrypt_envelope(&envelope)
+                        .context("failed to decrypt session token")?;
                     self.cfg.session_token = Some(token);
                     self.cfg.save()?;
                     eprintln!();
@@ -251,9 +236,61 @@ impl Client {
                     eprintln!();
                     bail!("request expired without approval");
                 }
-                _ => eprint!("."),
+                // Still pending. The server re-sends the approval token envelope on
+                // every poll; decrypt and show it to the human exactly once so they
+                // can relay it to the admin approving the request.
+                _ => {
+                    if !approval_shown {
+                        if let Some(env) = status.approval_envelope.as_ref() {
+                            match Self::decrypt_envelope(env) {
+                                Ok(token) => {
+                                    eprintln!();
+                                    eprintln!("  Approval code: {token}");
+                                    eprintln!(
+                                        "  → relay this to your admin to approve this session"
+                                    );
+                                    eprintln!("  Polling every 5s.  Press  Ctrl+C  to cancel.");
+                                    approval_shown = true;
+                                }
+                                Err(e) => {
+                                    eprintln!();
+                                    eprintln!("  warning: could not decrypt approval code: {e}");
+                                    // Don't set approval_shown — retry on the next poll.
+                                }
+                            }
+                        }
+                    }
+                    eprint!(".");
+                }
             }
         }
+    }
+
+    /// Unwrap an ECDH device-KV envelope with this CLI's local device private key.
+    /// Used for both the approval token (while pending) and the session token
+    /// (on `approved`) — they share the exact same envelope scheme.
+    fn decrypt_envelope(envelope: &Envelope) -> Result<String> {
+        // The CLI only ever registers an x25519 device key, so the envelope
+        // wrapped for our device must be x25519. `decrypt_device_kv` is
+        // x25519-only; guard against anything else rather than mis-decrypt.
+        if envelope.recipient.key_type != "x25519" {
+            bail!(
+                "envelope was wrapped for key type '{}', but this CLI's device \
+                 key is x25519 — cannot decrypt",
+                envelope.recipient.key_type
+            );
+        }
+        let priv_key_b64 = crate::commands::device::load_private_key_b64()?;
+        let plaintext = crate::crypto::decrypt_device_kv(
+            &priv_key_b64,
+            &envelope.recipient.ephemeral_pub,
+            &envelope.recipient.dek_nonce,
+            &envelope.recipient.encrypted_dek,
+            &envelope.nonce,
+            &envelope.ciphertext,
+            &envelope.aad,
+        )?;
+        String::from_utf8(plaintext).context("decrypted envelope is not valid UTF-8")
     }
 
     async fn send_with_auth(
