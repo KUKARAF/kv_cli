@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rand_core::OsRng;
 use reqwest::Method;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::PathBuf;
 use tabled::{Table, Tabled};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -55,17 +55,16 @@ pub fn load_private_key_b64() -> Result<String> {
 
 // ── API types ─────────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
-struct RegisterRequest {
-    name: String,
-    public_key: String,
-    key_type: &'static str,
-}
-
-#[derive(Deserialize)]
-struct RegisterResponse {
-    id: String,
-}
+// Device registration is now WebAuthn-gated and two-step on the server:
+//   POST /api/devices/register/begin  {name, public_key, key_type}
+//        -> {challenge_id, options}   (a WebAuthn assertion challenge)
+//   POST /api/devices/register/finish {challenge_id, assertion}
+//        -> {id}
+// A headless CLI cannot produce the signed WebAuthn assertion the `finish` step
+// requires, so we deliberately do NOT drive this flow (and never fabricate an
+// assertion). Instead `register` generates + stores the keypair locally and prints
+// the public key for a human to enrol via a WebAuthn-capable surface (web admin
+// panel or Android app); `set-id` then records the server-assigned device id.
 
 #[derive(Deserialize, Tabled)]
 struct DeviceRow {
@@ -82,26 +81,36 @@ fn opt_str(v: &Option<String>) -> String {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-pub async fn register(client: &mut Client, name: String) -> Result<()> {
+pub fn register(name: String) -> Result<()> {
     let secret = load_or_create_key()?;
     let public_key = B64.encode(PublicKey::from(&secret).as_bytes());
 
-    let body = RegisterRequest {
-        name: name.clone(),
-        public_key,
-        key_type: "x25519",
-    };
-    let resp = client
-        .request_bearer(Method::POST, "/api/devices", Some(&body))
-        .await?;
-    let text = Client::expect_success(resp).await?;
-    let created: RegisterResponse =
-        serde_json::from_str(&text).context("failed to parse registration response")?;
+    // The server's device-registration endpoint is now WebAuthn-gated (see the
+    // note above the API types). We cannot complete a WebAuthn assertion headlessly,
+    // so registration is a manual, out-of-band enrolment: print the public key and
+    // let the user enrol it via a WebAuthn-capable surface.
+    eprintln!();
+    eprintln!("  Device keypair ready. To register '{name}', enrol this PUBLIC KEY on the server");
+    eprintln!("  via a WebAuthn-capable surface (web admin panel or the Android app):");
+    eprintln!();
+    eprintln!("    name:       {name}");
+    eprintln!("    key_type:   x25519");
+    eprintln!("    public_key: {public_key}");
+    eprintln!();
+    eprintln!("  The private key stays local; only the public key above leaves this machine.");
+    eprintln!("  Registration is WebAuthn-gated and requires a signed assertion, which a headless");
+    eprintln!("  CLI cannot produce — so this command does NOT contact the server.");
+    eprintln!();
+    eprintln!("  After the server assigns a device id, save it with:");
+    eprintln!("    kv device set-id <device-id>");
+    eprintln!();
+    Ok(())
+}
 
-    client.cfg.device_id = Some(created.id.clone());
+pub fn set_id(client: &mut Client, id: String) -> Result<()> {
+    client.cfg.device_id = Some(id.clone());
     client.cfg.save()?;
-
-    eprintln!("Registered device '{}' (id: {})", name, created.id);
+    eprintln!("Saved device id {id} to config.");
     Ok(())
 }
 

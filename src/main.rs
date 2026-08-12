@@ -124,10 +124,17 @@ enum KeysCmd {
 
 #[derive(Subcommand)]
 enum DeviceCmd {
-    /// Register this CLI as a device (generates key pair if needed)
+    /// Generate this CLI's device key pair and print its public key for enrolment.
+    /// Registration is WebAuthn-gated on the server, so enrol the printed public key
+    /// via the web admin panel or Android app, then run `device set-id`.
     Register {
         /// Device name (e.g. "work-laptop")
         name: String,
+    },
+    /// Record the server-assigned device id in local config (after out-of-band enrolment)
+    SetId {
+        /// The device id assigned by the server when the public key was enrolled
+        id: String,
     },
     /// List all registered devices
     List,
@@ -256,6 +263,9 @@ enum SessionCmd {
         /// Requested session duration, e.g. 24h, 7d, 30d, 90d, 365d. Admin can override.
         #[arg(long)]
         duration: Option<String>,
+        /// Device id to wrap the approved token for (defaults to the configured device)
+        #[arg(long)]
+        device: Option<String>,
     },
 }
 
@@ -365,13 +375,20 @@ async fn run() -> Result<()> {
                     std::process::exit(1);
                 }
             }
-            SessionCmd::Request { label, duration } => {
-                commands::session_request::request(&mut client, label, duration).await?;
+            SessionCmd::Request {
+                label,
+                duration,
+                device,
+            } => {
+                commands::session_request::request(&mut client, label, duration, device).await?;
             }
         },
         Cmd::Device(device_cmd) => match device_cmd {
             DeviceCmd::Register { name } => {
-                commands::device::register(&mut client, name).await?;
+                commands::device::register(name)?;
+            }
+            DeviceCmd::SetId { id } => {
+                commands::device::set_id(&mut client, id)?;
             }
             DeviceCmd::List => {
                 commands::device::list(&mut client).await?;

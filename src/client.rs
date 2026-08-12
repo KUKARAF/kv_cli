@@ -22,6 +22,9 @@ enum Auth {
 struct SessionRequestBody {
     label: Option<String>,
     requested_duration_hours: Option<i64>,
+    /// Registered device the approved session token will be ECDH-wrapped to.
+    /// Server returns 404 if it doesn't reference an existing device.
+    device_id: String,
 }
 
 #[derive(Deserialize)]
@@ -40,7 +43,28 @@ struct SessionRequestCreated {
 #[derive(Deserialize)]
 struct SessionRequestStatus {
     status: String,
-    session_token: Option<String>,
+    /// Present exactly once, on the `approved` (one-time claim) poll. Subsequent
+    /// polls return `status: "delivered"` with `envelope: null`.
+    #[serde(default)]
+    envelope: Option<Envelope>,
+}
+
+/// ECDH-wrapped session token — same envelope scheme as device-encrypted KV values
+/// (`decrypt_device_kv`). All base64 fields are STANDARD (not url-safe).
+#[derive(Deserialize)]
+struct Envelope {
+    nonce: String,
+    ciphertext: String,
+    aad: String,
+    recipient: EnvelopeRecipient,
+}
+
+#[derive(Deserialize)]
+struct EnvelopeRecipient {
+    key_type: String,
+    ephemeral_pub: String,
+    dek_nonce: String,
+    encrypted_dek: String,
 }
 
 impl Client {
@@ -92,7 +116,21 @@ impl Client {
         &mut self,
         label: Option<String>,
         duration_hours: Option<i64>,
+        device_override: Option<String>,
     ) -> Result<()> {
+        // The approved token is delivered ECDH-wrapped to a registered device's
+        // public key — so we must tell the server which device to wrap it for, and
+        // we need that device's private key locally to unwrap it later.
+        let device_id = device_override
+            .or_else(|| self.cfg.device_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no device registered — run `kv device register <name>`, enrol its public \
+                     key via the web admin panel or Android app (WebAuthn-gated), then \
+                     `kv device set-id <device-id>`, before requesting a session"
+                )
+            })?;
+
         let url = format!("{}/api/session-request", self.base_url);
         let resp = self
             .http_post_unauthenticated(
@@ -100,6 +138,7 @@ impl Client {
                 &SessionRequestBody {
                     label,
                     requested_duration_hours: duration_hours,
+                    device_id: device_id.clone(),
                 },
             )
             .await?;
@@ -107,6 +146,13 @@ impl Client {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            if status.as_u16() == 404 {
+                bail!(
+                    "server returned 404 for device_id {device_id}: no such registered device. \
+                     Enrol this CLI's device key first (see `kv device register`), then \
+                     `kv device set-id <device-id>`."
+                );
+            }
             bail!("server returned {status}: {text}");
         }
 
@@ -159,14 +205,43 @@ impl Client {
 
             match status.status.as_str() {
                 "approved" => {
-                    let token = status
-                        .session_token
-                        .ok_or_else(|| anyhow::anyhow!("server approved but returned no token"))?;
+                    let envelope = status.envelope.ok_or_else(|| {
+                        anyhow::anyhow!("server approved but returned no envelope")
+                    })?;
+                    // The CLI only ever registers an x25519 device key, so the envelope
+                    // wrapped for our device must be x25519. `decrypt_device_kv` is
+                    // x25519-only; guard against anything else rather than mis-decrypt.
+                    if envelope.recipient.key_type != "x25519" {
+                        bail!(
+                            "session token was wrapped for key type '{}', but this CLI's device \
+                             key is x25519 — cannot decrypt",
+                            envelope.recipient.key_type
+                        );
+                    }
+                    let priv_key_b64 = crate::commands::device::load_private_key_b64()?;
+                    let plaintext = crate::crypto::decrypt_device_kv(
+                        &priv_key_b64,
+                        &envelope.recipient.ephemeral_pub,
+                        &envelope.recipient.dek_nonce,
+                        &envelope.recipient.encrypted_dek,
+                        &envelope.nonce,
+                        &envelope.ciphertext,
+                        &envelope.aad,
+                    )?;
+                    let token = String::from_utf8(plaintext)
+                        .context("decrypted session token is not valid UTF-8")?;
                     self.cfg.session_token = Some(token);
                     self.cfg.save()?;
                     eprintln!();
-                    eprintln!("  ✅  Session approved and saved to config.");
+                    eprintln!("  ✅  Session approved, token decrypted and saved to config.");
                     return Ok(());
+                }
+                "delivered" => {
+                    eprintln!();
+                    bail!(
+                        "session token was already delivered (the one-time envelope is consumed) \
+                         — request a new session"
+                    );
                 }
                 "rejected" => {
                     eprintln!();
@@ -253,7 +328,7 @@ impl Client {
         }
 
         if self.cfg.session_token.is_none() {
-            self.acquire_session_token(None, None).await?;
+            self.acquire_session_token(None, None, None).await?;
         }
 
         let resp = self
@@ -264,7 +339,7 @@ impl Client {
             // Clear from memory so send_with_auth doesn't retry with the stale token,
             // but don't save to disk yet — acquire_session_token will save on success.
             self.cfg.session_token = None;
-            self.acquire_session_token(None, None).await?;
+            self.acquire_session_token(None, None, None).await?;
             let resp2 = self
                 .send_with_auth(method, path, &Auth::Bearer, body)
                 .await?;

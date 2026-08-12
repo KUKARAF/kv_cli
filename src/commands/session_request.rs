@@ -5,9 +5,10 @@ pub async fn request(
     client: &mut Client,
     label: Option<String>,
     duration: Option<String>,
+    device: Option<String>,
 ) -> Result<()> {
     let hours = duration.as_deref().map(parse_duration_hours).transpose()?;
-    client.acquire_session_token(label, hours).await
+    client.acquire_session_token(label, hours, device).await
 }
 
 fn parse_duration_hours(s: &str) -> Result<i64> {
