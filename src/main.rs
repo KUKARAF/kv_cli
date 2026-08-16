@@ -272,6 +272,11 @@ enum SessionCmd {
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
+        // Session-approval prompts already printed a clean, actionable message
+        // ("session timed out — approve: <url>"); don't bury it under "error:".
+        if e.downcast_ref::<client::SessionApprovalPending>().is_some() {
+            std::process::exit(1);
+        }
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }

@@ -8,6 +8,24 @@ pub struct Config {
     pub session_token: Option<String>,
     pub api_key: Option<String>,
     pub device_id: Option<String>,
+    /// A session-request awaiting human approval, saved so the NEXT `kv`
+    /// invocation can claim the approved token (the token is delivered once, on
+    /// the "approved" status poll) instead of blocking on a poll loop. Set when
+    /// a command hits an expired/absent session and prints the approval link;
+    /// cleared once claimed or found dead.
+    #[serde(default)]
+    pub pending_session_request: Option<PendingSessionRequest>,
+}
+
+/// Persisted handle to an in-flight session approval (see
+/// [`Config::pending_session_request`]).
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct PendingSessionRequest {
+    pub id: String,
+    /// Proves the poller created the request (not just someone who saw the id).
+    pub poll_secret: String,
+    pub url: String,
+    pub expires_at: String,
 }
 
 impl Config {
