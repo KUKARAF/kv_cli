@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::interval;
 
-use crate::config::Config;
+use crate::config::{Config, PendingSessionRequest};
 
 pub struct Client {
     pub cfg: Config,
@@ -17,6 +17,39 @@ pub struct Client {
 enum Auth {
     Bearer,
 }
+
+/// Why a fresh session is being requested — drives the headline shown to the
+/// user alongside the approval link.
+#[derive(Clone, Copy)]
+enum SessionReason {
+    NoSession,
+    TimedOut,
+}
+
+/// Result of polling a pending session-request's status once.
+enum ClaimOutcome {
+    /// Approved and the (decrypted) session token claimed.
+    Claimed(String),
+    /// Still awaiting approval (or a transient non-200).
+    StillPending,
+    /// Consumed/rejected/expired/not-found — the pending handle is useless now.
+    Dead,
+}
+
+/// Sentinel error meaning "authentication needs human approval and the CLI has
+/// already printed an actionable `session timed out — approve: <url>` message".
+/// `main` exits non-zero on this WITHOUT the generic `error: …` prefix, so the
+/// clean message we printed is the last thing the user sees.
+#[derive(Debug)]
+pub struct SessionApprovalPending;
+
+impl std::fmt::Display for SessionApprovalPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "session approval required")
+    }
+}
+
+impl std::error::Error for SessionApprovalPending {}
 
 #[derive(Serialize)]
 struct SessionRequestBody {
@@ -44,11 +77,6 @@ struct SessionRequestStatus {
     /// polls return `status: "delivered"` with `envelope: null`.
     #[serde(default)]
     envelope: Option<Envelope>,
-    /// Present while the request is still pending (`status != "approved"`),
-    /// re-fetchable on every poll. Same device-KV envelope scheme as `envelope`;
-    /// decrypts to the one-time approval token the human relays to the admin.
-    #[serde(default)]
-    approval_envelope: Option<Envelope>,
 }
 
 /// ECDH-wrapped session token — same envelope scheme as device-encrypted KV values
@@ -112,18 +140,11 @@ impl Client {
         }
     }
 
-    /// Show the Tailscale-style approval flow: prints URL + QR code, polls until approved.
-    /// Saves the resulting session token to config on success.
-    pub async fn acquire_session_token(
-        &mut self,
-        label: Option<String>,
-        duration_hours: Option<i64>,
-        device_override: Option<String>,
-    ) -> Result<()> {
-        // The approved token is delivered ECDH-wrapped to a registered device's
-        // public key — so we must tell the server which device to wrap it for, and
-        // we need that device's private key locally to unwrap it later.
-        let device_id = device_override
+    /// Resolve which registered device the approved token should be wrapped for
+    /// (explicit override → config). We need that device's private key locally
+    /// to unwrap the ECDH-wrapped token later.
+    fn resolve_device_id(&self, device_override: Option<String>) -> Result<String> {
+        device_override
             .or_else(|| self.cfg.device_id.clone())
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -131,8 +152,17 @@ impl Client {
                      key via the web admin panel or Android app (WebAuthn-gated), then \
                      `kv device set-id <device-id>`, before requesting a session"
                 )
-            })?;
+            })
+    }
 
+    /// Create a session-request on the server (no polling). The approved token
+    /// is delivered ECDH-wrapped to `device_id`'s public key.
+    async fn create_session_request(
+        &self,
+        device_id: &str,
+        label: Option<String>,
+        duration_hours: Option<i64>,
+    ) -> Result<SessionRequestCreated> {
         let url = format!("{}/api/session-request", self.base_url);
         let resp = self
             .http_post_unauthenticated(
@@ -140,7 +170,7 @@ impl Client {
                 &SessionRequestBody {
                     label,
                     requested_duration_hours: duration_hours,
-                    device_id: device_id.clone(),
+                    device_id: device_id.to_string(),
                 },
             )
             .await?;
@@ -158,7 +188,25 @@ impl Client {
             bail!("server returned {status}: {text}");
         }
 
-        let created: SessionRequestCreated = resp.json().await?;
+        resp.json()
+            .await
+            .context("failed to parse session-request response")
+    }
+
+    /// Show the Tailscale-style approval flow: prints URL + QR code, polls until
+    /// approved, saving the resulting token to config. Blocking — used by the
+    /// explicit `kv session request` command. (Automatic re-auth on an expired
+    /// session uses the non-blocking [`Self::begin_session_request`] instead.)
+    pub async fn acquire_session_token(
+        &mut self,
+        label: Option<String>,
+        duration_hours: Option<i64>,
+        device_override: Option<String>,
+    ) -> Result<()> {
+        let device_id = self.resolve_device_id(device_override)?;
+        let created = self
+            .create_session_request(&device_id, label, duration_hours)
+            .await?;
 
         eprintln!();
         eprintln!("  Approval URL:");
@@ -168,9 +216,7 @@ impl Client {
 
         print_qr(&created.url);
 
-        eprintln!("  Open the URL or scan the QR code to approve.");
-        eprintln!("  An approval code will appear below shortly — relay it to whoever");
-        eprintln!("  approves this request (approval requires it, proving it's for you).");
+        eprintln!("  Open the URL or scan the QR code and click Approve.");
         eprintln!("  Polling every 5s.  Press  Ctrl+C  to cancel.");
         eprintln!();
 
@@ -181,10 +227,6 @@ impl Client {
         );
         let mut ticker = interval(Duration::from_secs(5));
         ticker.tick().await;
-
-        // Print the relay-to-admin approval token only once, even though the
-        // server returns it on every pending poll.
-        let mut approval_shown = false;
 
         loop {
             ticker.tick().await;
@@ -236,30 +278,8 @@ impl Client {
                     eprintln!();
                     bail!("request expired without approval");
                 }
-                // Still pending. The server re-sends the approval token envelope on
-                // every poll; decrypt and show it to the human exactly once so they
-                // can relay it to the admin approving the request.
+                // Still pending.
                 _ => {
-                    if !approval_shown {
-                        if let Some(env) = status.approval_envelope.as_ref() {
-                            match Self::decrypt_envelope(env) {
-                                Ok(token) => {
-                                    eprintln!();
-                                    eprintln!("  Approval code: {token}");
-                                    eprintln!(
-                                        "  → relay this to your admin to approve this session"
-                                    );
-                                    eprintln!("  Polling every 5s.  Press  Ctrl+C  to cancel.");
-                                    approval_shown = true;
-                                }
-                                Err(e) => {
-                                    eprintln!();
-                                    eprintln!("  warning: could not decrypt approval code: {e}");
-                                    // Don't set approval_shown — retry on the next poll.
-                                }
-                            }
-                        }
-                    }
                     eprint!(".");
                 }
             }
@@ -267,8 +287,7 @@ impl Client {
     }
 
     /// Unwrap an ECDH device-KV envelope with this CLI's local device private key.
-    /// Used for both the approval token (while pending) and the session token
-    /// (on `approved`) — they share the exact same envelope scheme.
+    /// Used for the session token delivered on `approved`.
     fn decrypt_envelope(envelope: &Envelope) -> Result<String> {
         // The CLI only ever registers an x25519 device key, so the envelope
         // wrapped for our device must be x25519. `decrypt_device_kv` is
@@ -345,27 +364,135 @@ impl Client {
         }
     }
 
+    /// Poll a pending session-request's status exactly once (non-blocking).
+    async fn poll_session_once(&self, pending: &PendingSessionRequest) -> Result<ClaimOutcome> {
+        let status_path = format!(
+            "/api/session-request/{}/status?secret={}",
+            crate::urlencode::urlencode(&pending.id),
+            crate::urlencode::urlencode(&pending.poll_secret)
+        );
+        let resp = self.send_unauthenticated(Method::GET, &status_path).await?;
+        let code = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+
+        if code == 404 {
+            return Ok(ClaimOutcome::Dead);
+        }
+        if code != 200 {
+            return Ok(ClaimOutcome::StillPending);
+        }
+        let status: SessionRequestStatus = match serde_json::from_str(&body) {
+            Ok(s) => s,
+            Err(_) => return Ok(ClaimOutcome::StillPending),
+        };
+        match status.status.as_str() {
+            "approved" => {
+                let envelope = status
+                    .envelope
+                    .ok_or_else(|| anyhow::anyhow!("server approved but returned no envelope"))?;
+                let token =
+                    Self::decrypt_envelope(&envelope).context("failed to decrypt session token")?;
+                Ok(ClaimOutcome::Claimed(token))
+            }
+            "delivered" | "rejected" | "expired" => Ok(ClaimOutcome::Dead),
+            _ => Ok(ClaimOutcome::StillPending),
+        }
+    }
+
+    /// Create a fresh session-request, persist it so the NEXT run can claim the
+    /// approved token, and print a non-blocking "approve: <url>" message. Does
+    /// NOT wait for approval.
+    async fn begin_session_request(&mut self, reason: SessionReason) -> Result<()> {
+        let device_id = self.resolve_device_id(None)?;
+        let created = self.create_session_request(&device_id, None, None).await?;
+
+        let pending = PendingSessionRequest {
+            id: created.id.clone(),
+            poll_secret: created.poll_secret.clone(),
+            url: created.url.clone(),
+            expires_at: created.expires_at.clone(),
+        };
+        self.cfg.pending_session_request = Some(pending.clone());
+        self.cfg.save()?;
+
+        let headline = match reason {
+            SessionReason::TimedOut => "session timed out — please approve a new session:",
+            SessionReason::NoSession => "no active session — please approve one:",
+        };
+        eprintln!();
+        eprintln!("  {headline}");
+        eprintln!("  {}", created.url);
+        eprintln!("  Expires: {}", created.expires_at);
+        print_qr(&created.url);
+        eprintln!("  Open the link (or QR) and click Approve, then re-run your command.");
+        eprintln!();
+        Ok(())
+    }
+
+    /// Ensure a usable session token WITHOUT blocking on approval. Returns
+    /// `Ok(())` only when a token is now available (claimed from a pending
+    /// request). Otherwise prints an actionable approval message and returns
+    /// [`SessionApprovalPending`] for the caller to propagate (→ exit 1).
+    async fn ensure_session_or_report(&mut self, reason: SessionReason) -> Result<()> {
+        // A prior run may have left a pending request — try to claim it first.
+        if let Some(pending) = self.cfg.pending_session_request.clone() {
+            match self.poll_session_once(&pending).await? {
+                ClaimOutcome::Claimed(token) => {
+                    self.cfg.session_token = Some(token);
+                    self.cfg.pending_session_request = None;
+                    self.cfg.save()?;
+                    return Ok(());
+                }
+                ClaimOutcome::StillPending => {
+                    eprintln!();
+                    eprintln!("  session approval still pending — approve:");
+                    eprintln!("  {}", pending.url);
+                    eprintln!("  Then re-run your command.");
+                    eprintln!();
+                    return Err(SessionApprovalPending.into());
+                }
+                ClaimOutcome::Dead => {
+                    self.cfg.pending_session_request = None;
+                    self.cfg.save()?;
+                    // fall through to create a fresh request
+                }
+            }
+        }
+        self.begin_session_request(reason).await?;
+        Err(SessionApprovalPending.into())
+    }
+
     pub async fn request_bearer(
         &mut self,
         method: Method,
         path: &str,
         body: Option<&impl Serialize>,
     ) -> Result<Response> {
+        // --silent keeps its documented "fail instead of escalating" contract:
+        // never create a request or block, just point at the interactive command.
         if self.silent {
             if self.cfg.session_token.is_none() {
-                bail!("no session token configured (--silent mode)");
+                bail!(
+                    "no session token configured — run `kv session request` \
+                     (--silent won't approve one)"
+                );
             }
             let resp = self
                 .send_with_auth(method, path, &Auth::Bearer, body)
                 .await?;
             if resp.status() == StatusCode::UNAUTHORIZED {
-                bail!("session token expired (--silent mode)");
+                bail!(
+                    "session timed out — run `kv session request` to approve a new \
+                     session (--silent won't)"
+                );
             }
             return Ok(resp);
         }
 
+        // No token yet: claim a pending approval, or print a link and exit.
         if self.cfg.session_token.is_none() {
-            self.acquire_session_token(None, None, None).await?;
+            self.ensure_session_or_report(SessionReason::NoSession)
+                .await?;
         }
 
         let resp = self
@@ -373,10 +500,13 @@ impl Client {
             .await?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
-            // Clear from memory so send_with_auth doesn't retry with the stale token,
-            // but don't save to disk yet — acquire_session_token will save on success.
+            // Stale token — drop it so we don't retry with it, then claim a
+            // pending approval or print a link and exit.
             self.cfg.session_token = None;
-            self.acquire_session_token(None, None, None).await?;
+            let _ = self.cfg.save();
+            self.ensure_session_or_report(SessionReason::TimedOut)
+                .await?;
+            // Reaches here only if a pending token was claimed just now.
             let resp2 = self
                 .send_with_auth(method, path, &Auth::Bearer, body)
                 .await?;
