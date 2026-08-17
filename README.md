@@ -36,10 +36,17 @@ kv keys list
 kv keys create <label> [--type standard|one_time|approval_required] [--scope <pattern:perms>]
 kv keys revoke <id>
 
-kv device register <name>
+kv device propose <name>   # recommended: generates a keypair, then polls until
+                            # an admin confirms it via WebAuthn — no manual copy/paste
+kv device register <name>  # legacy: prints the public key for manual out-of-band
+                            # enrolment; follow up with `device set-id`
+kv device set-id <id>      # (legacy) record the server-assigned device id after
+                            # manually enrolling a `device register` public key
 kv device list
 kv device unregister [id]  # omit id to pick interactively with fzf
 
 kv session check           # exits 0 if valid, 1 if missing/expired (no output)
 kv session request [--label <label>] [--duration 7d|30d|90d|365d]
+
+kv status                  # session validity + which device it's bound to
 ```

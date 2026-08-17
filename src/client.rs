@@ -55,9 +55,52 @@ impl std::error::Error for SessionApprovalPending {}
 struct SessionRequestBody {
     label: Option<String>,
     requested_duration_hours: Option<i64>,
-    /// Registered device the approved session token will be ECDH-wrapped to.
-    /// Server returns 404 if it doesn't reference an existing device.
+    /// Proves possession of the device's private key (see `ChallengeRequestBody`
+    /// below) — replaces the old bare `device_id` field.
+    challenge_id: String,
+    /// Plaintext nonce decrypted from the challenge envelope.
+    nonce: String,
+}
+
+#[derive(Serialize)]
+struct ChallengeRequestBody {
     device_id: String,
+}
+
+#[derive(Deserialize)]
+struct ChallengeCreated {
+    challenge_id: String,
+    envelope: Envelope,
+}
+
+#[derive(Serialize)]
+struct ProposeDeviceBody {
+    name: String,
+    public_key: String,
+    key_type: String,
+}
+
+/// Response to `POST /api/devices/propose` — mirrors `SessionRequestCreated`'s
+/// create/poll shape.
+#[derive(Deserialize)]
+pub struct ProposeCreated {
+    pub id: String,
+    pub url: String,
+    pub expires_at: String,
+    pub poll_secret: String,
+}
+
+#[derive(Deserialize)]
+struct ProposeStatus {
+    status: String,
+    #[serde(default)]
+    device_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct Whoami {
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -148,21 +191,58 @@ impl Client {
             .or_else(|| self.cfg.device_id.clone())
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "no device registered — run `kv device register <name>`, enrol its public \
-                     key via the web admin panel or Android app (WebAuthn-gated), then \
-                     `kv device set-id <device-id>`, before requesting a session"
+                    "no device registered — run `kv device propose <name>` (recommended, \
+                     auto-enrols after an admin confirms) or the manual `kv device register \
+                     <name>` + `kv device set-id <device-id>` flow, before requesting a session"
                 )
             })
     }
 
     /// Create a session-request on the server (no polling). The approved token
     /// is delivered ECDH-wrapped to `device_id`'s public key.
+    ///
+    /// Two steps, both required by the server since the possession-proof
+    /// hardening: first prove we hold `device_id`'s private key by decrypting a
+    /// server-issued challenge envelope, then submit the decrypted nonce along
+    /// with the actual request. A bare `device_id` is no longer accepted.
     async fn create_session_request(
         &self,
         device_id: &str,
         label: Option<String>,
         duration_hours: Option<i64>,
     ) -> Result<SessionRequestCreated> {
+        let challenge_url = format!("{}/api/session-request/challenge", self.base_url);
+        let challenge_resp = self
+            .http_post_unauthenticated(
+                &challenge_url,
+                &ChallengeRequestBody {
+                    device_id: device_id.to_string(),
+                },
+            )
+            .await?;
+
+        if !challenge_resp.status().is_success() {
+            let status = challenge_resp.status();
+            let text = challenge_resp.text().await.unwrap_or_default();
+            if status.as_u16() == 404 {
+                bail!(
+                    "server returned 404 for device_id {device_id}: no such registered device. \
+                     Enrol this CLI's device key first (see `kv device propose`), then \
+                     `kv device set-id <device-id>`."
+                );
+            }
+            bail!("server returned {status}: {text}");
+        }
+
+        let challenge: ChallengeCreated = challenge_resp
+            .json()
+            .await
+            .context("failed to parse session-request challenge response")?;
+
+        let nonce = Self::decrypt_envelope(&challenge.envelope).context(
+            "failed to decrypt session-request challenge — is the local device key correct?",
+        )?;
+
         let url = format!("{}/api/session-request", self.base_url);
         let resp = self
             .http_post_unauthenticated(
@@ -170,7 +250,8 @@ impl Client {
                 &SessionRequestBody {
                     label,
                     requested_duration_hours: duration_hours,
-                    device_id: device_id.to_string(),
+                    challenge_id: challenge.challenge_id,
+                    nonce,
                 },
             )
             .await?;
@@ -178,13 +259,9 @@ impl Client {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if status.as_u16() == 404 {
-                bail!(
-                    "server returned 404 for device_id {device_id}: no such registered device. \
-                     Enrol this CLI's device key first (see `kv device register`), then \
-                     `kv device set-id <device-id>`."
-                );
-            }
+            // Deliberately generic: the server returns the same 404 for a
+            // missing/expired/already-consumed challenge or a wrong nonce, so
+            // we don't try to distinguish those cases here either.
             bail!("server returned {status}: {text}");
         }
 
@@ -310,6 +387,71 @@ impl Client {
             &envelope.aad,
         )?;
         String::from_utf8(plaintext).context("decrypted envelope is not valid UTF-8")
+    }
+
+    /// Propose a new device for enrolment (`POST /api/devices/propose`). An admin
+    /// must confirm via a WebAuthn passkey touch on the web dashboard before the
+    /// returned proposal becomes a real device id — poll [`Self::poll_propose_status`]
+    /// for that.
+    pub async fn propose_device(&self, name: &str, public_key_b64: &str) -> Result<ProposeCreated> {
+        let url = format!("{}/api/devices/propose", self.base_url);
+        let resp = self
+            .http_post_unauthenticated(
+                &url,
+                &ProposeDeviceBody {
+                    name: name.to_string(),
+                    public_key: public_key_b64.to_string(),
+                    key_type: "x25519".to_string(),
+                },
+            )
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            bail!("server returned {status}: {text}");
+        }
+
+        resp.json()
+            .await
+            .context("failed to parse device-propose response")
+    }
+
+    /// Poll a device proposal's status once. Returns `(status, device_id)` —
+    /// `device_id` is present only once `status == "confirmed"`. Safe to poll
+    /// repeatedly even after confirmation (idempotent, unlike session-token
+    /// delivery).
+    pub async fn poll_propose_status(
+        &self,
+        id: &str,
+        secret: &str,
+    ) -> Result<(String, Option<String>)> {
+        let path = format!(
+            "/api/devices/propose/{}/status?secret={}",
+            crate::urlencode::urlencode(id),
+            crate::urlencode::urlencode(secret)
+        );
+        let resp = self.send_unauthenticated(Method::GET, &path).await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            bail!("server returned {status}: {text}");
+        }
+        let status: ProposeStatus = resp
+            .json()
+            .await
+            .context("failed to parse device-propose status response")?;
+        Ok((status.status, status.device_id))
+    }
+
+    /// `GET /api/admin/session/whoami` — which device (if any) the current
+    /// session token is bound to.
+    pub async fn whoami(&mut self) -> Result<Whoami> {
+        let resp = self
+            .request_bearer(Method::GET, "/api/admin/session/whoami", None::<&()>)
+            .await?;
+        let body = Self::expect_success(resp).await?;
+        serde_json::from_str(&body).context("failed to parse whoami response")
     }
 
     async fn send_with_auth(

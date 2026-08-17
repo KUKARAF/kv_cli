@@ -1,10 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rand_core::OsRng;
 use reqwest::Method;
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::time::Duration;
 use tabled::{Table, Tabled};
+use tokio::time::interval;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::client::Client;
@@ -55,16 +57,23 @@ pub fn load_private_key_b64() -> Result<String> {
 
 // ── API types ─────────────────────────────────────────────────────────────────
 
-// Device registration is now WebAuthn-gated and two-step on the server:
+// Device registration is WebAuthn-gated and two-step on the server:
 //   POST /api/devices/register/begin  {name, public_key, key_type}
 //        -> {challenge_id, options}   (a WebAuthn assertion challenge)
 //   POST /api/devices/register/finish {challenge_id, assertion}
 //        -> {id}
 // A headless CLI cannot produce the signed WebAuthn assertion the `finish` step
 // requires, so we deliberately do NOT drive this flow (and never fabricate an
-// assertion). Instead `register` generates + stores the keypair locally and prints
-// the public key for a human to enrol via a WebAuthn-capable surface (web admin
-// panel or Android app); `set-id` then records the server-assigned device id.
+// assertion). `register` (legacy, manual) generates + stores the keypair locally
+// and prints the public key for a human to enrol via a WebAuthn-capable surface
+// (web admin panel or Android app); `set-id` then records the server-assigned
+// device id.
+//
+// `propose` (recommended) automates the same enrolment without any copy-pasting:
+//   POST /api/devices/propose {name, public_key, key_type} -> {id, url, expires_at, poll_secret}
+//   GET  /api/devices/propose/{id}/status?secret=...       -> {status, device_id?}
+// The security gate is unchanged (an admin must confirm via WebAuthn on the
+// dashboard) — this just replaces manual copy/paste with polling.
 
 #[derive(Deserialize, Tabled)]
 struct DeviceRow {
@@ -82,10 +91,14 @@ fn opt_str(v: &Option<String>) -> String {
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 pub fn register(name: String) -> Result<()> {
+    eprintln!(
+        "  note: `kv device propose <name>` automates this whole flow (no manual \
+         set-id step) — prefer it unless you have a reason not to."
+    );
     let secret = load_or_create_key()?;
     let public_key = B64.encode(PublicKey::from(&secret).as_bytes());
 
-    // The server's device-registration endpoint is now WebAuthn-gated (see the
+    // The server's device-registration endpoint is WebAuthn-gated (see the
     // note above the API types). We cannot complete a WebAuthn assertion headlessly,
     // so registration is a manual, out-of-band enrolment: print the public key and
     // let the user enrol it via a WebAuthn-capable surface.
@@ -105,6 +118,77 @@ pub fn register(name: String) -> Result<()> {
     eprintln!("    kv device set-id <device-id>");
     eprintln!();
     Ok(())
+}
+
+/// Recommended enrolment path: generate/reuse the local device keypair, propose
+/// it to the server, and poll until an admin confirms it via a WebAuthn passkey
+/// touch on the web dashboard — then save the assigned `device_id` to config
+/// automatically. No manual `device set-id` step needed.
+pub async fn propose(client: &mut Client, name: String) -> Result<()> {
+    let secret = load_or_create_key()?;
+    let public_key = B64.encode(PublicKey::from(&secret).as_bytes());
+
+    let created = client.propose_device(&name, &public_key).await?;
+
+    eprintln!();
+    eprintln!("  Device proposal created for '{name}'.");
+    eprintln!("  Open this link and confirm with a passkey touch:");
+    eprintln!();
+    eprintln!("  {}", created.url);
+    eprintln!();
+    eprintln!("  Expires: {}", created.expires_at);
+    eprintln!("  Polling every 5s until confirmed.  Press  Ctrl+C  to cancel.");
+    eprintln!();
+
+    // Proposals expire in 30 minutes server-side; give up around the same time
+    // rather than polling forever.
+    let timeout = Duration::from_secs(30 * 60);
+    let start = std::time::Instant::now();
+    let mut ticker = interval(Duration::from_secs(5));
+    ticker.tick().await; // first tick fires immediately
+
+    loop {
+        if start.elapsed() > timeout {
+            bail!("timed out waiting for device proposal confirmation (30 min)");
+        }
+        ticker.tick().await;
+
+        let (status, device_id) = match client
+            .poll_propose_status(&created.id, &created.poll_secret)
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => {
+                eprint!(".");
+                continue;
+            }
+        };
+
+        match status.as_str() {
+            "confirmed" => {
+                let device_id = device_id.ok_or_else(|| {
+                    anyhow::anyhow!("server confirmed the proposal but returned no device_id")
+                })?;
+                client.cfg.device_id = Some(device_id.clone());
+                client.cfg.save()?;
+                eprintln!();
+                eprintln!("  ✅  Device confirmed and saved: {device_id}");
+                return Ok(());
+            }
+            "rejected" => {
+                eprintln!();
+                bail!("device proposal was rejected by the admin");
+            }
+            "expired" => {
+                eprintln!();
+                bail!("device proposal expired without confirmation");
+            }
+            // "pending"
+            _ => {
+                eprint!(".");
+            }
+        }
+    }
 }
 
 pub fn set_id(client: &mut Client, id: String) -> Result<()> {

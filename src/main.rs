@@ -89,6 +89,8 @@ enum Cmd {
     /// Manage third-party provider management keys (always device-encrypted)
     #[command(subcommand, name = "mgmt-key")]
     MgmtKey(MgmtKeyCmd),
+    /// Show whether the current session is valid and which device it's bound to
+    Status,
     /// Write the man page to stdout
     #[command(hide = true)]
     GenerateManPage,
@@ -124,9 +126,17 @@ enum KeysCmd {
 
 #[derive(Subcommand)]
 enum DeviceCmd {
-    /// Generate this CLI's device key pair and print its public key for enrolment.
-    /// Registration is WebAuthn-gated on the server, so enrol the printed public key
-    /// via the web admin panel or Android app, then run `device set-id`.
+    /// Propose this CLI's device key pair for enrolment (recommended). Prints an
+    /// approval URL for an admin to confirm via WebAuthn, polls until confirmed,
+    /// then saves the assigned device id automatically — no manual `set-id` step.
+    Propose {
+        /// Device name (e.g. "work-laptop")
+        name: String,
+    },
+    /// (Legacy, manual) Generate this CLI's device key pair and print its public
+    /// key for enrolment. Registration is WebAuthn-gated on the server, so enrol
+    /// the printed public key via the web admin panel or Android app, then run
+    /// `device set-id`. Prefer `device propose` instead.
     Register {
         /// Device name (e.g. "work-laptop")
         name: String,
@@ -389,6 +399,9 @@ async fn run() -> Result<()> {
             }
         },
         Cmd::Device(device_cmd) => match device_cmd {
+            DeviceCmd::Propose { name } => {
+                commands::device::propose(&mut client, name).await?;
+            }
             DeviceCmd::Register { name } => {
                 commands::device::register(name)?;
             }
@@ -518,6 +531,9 @@ async fn run() -> Result<()> {
                 }
             },
         },
+        Cmd::Status => {
+            commands::session::status(&mut client).await?;
+        }
         // Genuinely unreachable: `Cmd::GenerateManPage` is intercepted and
         // handled (with an early return) at the top of `run()` before `cli`
         // is ever used to reach this match, so this arm can never execute.
