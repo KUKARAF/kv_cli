@@ -18,10 +18,14 @@ Please read it accurately — no secret material was exfiltrated.
   `openrouter` provider management key. This is metadata, **not** the secret
   key material.
 - The agent ran `kv mgmt-key keys list <mgmt_key_id>`, which returned HTTP 404.
-- The agent did **not** run `kv mgmt-key keys create`, `kv mgmt-key keys show`,
-  nor did it pass `--dangerously-show-content-on-agent-true`. **No provider key
-  was provisioned, and no raw management-key or provider-key secret was printed
-  or exfiltrated.**
+- Later, when explicitly asked to provision a key, the agent ran
+  `kv mgmt-key keys create <mgmt_key_id> <label> --limit 1 --limit-reset weekly`.
+  It also returned HTTP 404 — see "Provisioning is device-gated" below: the
+  current device is not a recipient of the management key, so the CLI could not
+  decrypt it and never reached the provider. The agent never passed
+  `--dangerously-show-content-on-agent-true` and never ran `kv mgmt-key keys show`.
+  **No provider key was provisioned, and no raw management-key or provider-key
+  secret was printed or exfiltrated.**
 
 ### The access vector (CLI side)
 
@@ -56,6 +60,49 @@ Please read it accurately — no secret material was exfiltrated.
 4. Protect `device.key` at rest via an OS keyring or hardware-backed store so
    that filesystem read access alone is not sufficient to act as the device.
 5. Emit a clear local audit trail for every `mgmt-key` subcommand invocation.
+
+### Provisioning is device-gated (observed 2026-09-20)
+
+`kv mgmt-key keys create` from this workstation returns HTTP 404. Tracing the
+flow: `keys_create` calls `decrypt_management_key()` first, which does
+`GET /api/admin/management-keys/{id}/devices/{this_device_id}` to fetch this
+device's *envelope* of the management key. The OpenRouter management key is not
+encrypted to this device (`thinkpad_cli`), so the envelope fetch 404s and the
+command aborts before ever calling the provider. `kv mgmt-key list` still works
+because it only reads record metadata, which is not device-scoped.
+
+This is a **good boundary**: a workstation — and any agent running on it — cannot
+provision provider keys unless an admin has explicitly encrypted the management
+key to that device. To enable provisioning here, an admin holding the key must
+re-share it to this device, ideally as an approval-gated operation (kv approver
+app), not a silent grant.
+
+### Structure for safe agent-driven provisioning
+
+If an autonomous agent is ever meant to mint and hand a scoped provider key to a
+local consumer (e.g. inject an OpenRouter key into an app under test) without
+routing the secret through a terminal/transcript, the intended structure is:
+
+1. **Prerequisite, human-gated:** the agent's device must be an explicit,
+   approval-granted recipient of the management key (see above). No standing
+   session should self-authorize this.
+2. **Scope every key:** always pass `--limit <cap> --limit-reset <cadence>` so a
+   leaked test key has a bounded blast radius, and use a dated, purpose-specific
+   label (e.g. `soloforge-e2e-2026-09-20`).
+3. **Never print the secret.** Today the only agent path to the raw value is
+   `--dangerously-show-content-on-agent-true`, which writes it to stdout, where
+   it lands in logs/transcripts. Add a sink that hands the secret to a consumer
+   without a terminal round-trip — e.g. `--write-to-fd <n>` or `--exec '<cmd>'`
+   (pipe the plaintext straight into the consuming process's stdin) — so the agent
+   orchestrates injection without ever reading the value itself.
+4. **Short TTL + revoke-on-done:** the agent revokes the provisioned key
+   (`kv mgmt-key keys revoke`) as soon as the task finishes; prefer keys that
+   auto-expire.
+5. **Audit:** log provision / reveal / revoke server-side and alert on
+   agent-pattern (non-interactive) usage.
+
+Until a no-print sink (item 3) exists, treat agent provisioning as unsupported:
+a human should provision and inject the key, or run the injection step directly.
 
 ### Follow-up
 
