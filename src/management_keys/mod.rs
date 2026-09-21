@@ -128,7 +128,13 @@ fn opt_f64(v: &Option<f64>) -> String {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async fn select_devices(client: &mut Client) -> Result<Vec<(String, String, String)>> {
+/// Resolve devices to encrypt for. `preselected` entries (device name or id) skip the
+/// interactive fzf picker — needed for non-TTY / automated invocations (e.g. a scheduled
+/// `provider-key rotate`).
+async fn select_devices(
+    client: &mut Client,
+    preselected: &[String],
+) -> Result<Vec<(String, String, String)>> {
     let resp = client
         .request_bearer(Method::GET, "/api/admin/devices", None::<&()>)
         .await?;
@@ -137,6 +143,18 @@ async fn select_devices(client: &mut Client) -> Result<Vec<(String, String, Stri
         serde_json::from_str(&body).context("failed to parse devices response")?;
     if devices.is_empty() {
         bail!("no registered devices — register at least one device first");
+    }
+    if !preselected.is_empty() {
+        return preselected
+            .iter()
+            .map(|wanted| {
+                let d = devices
+                    .iter()
+                    .find(|d| d.id == *wanted || d.name == *wanted)
+                    .ok_or_else(|| anyhow::anyhow!("no registered device named '{wanted}'"))?;
+                Ok((d.id.clone(), d.key_type.clone(), d.public_key.clone()))
+            })
+            .collect::<Result<Vec<_>>>();
     }
     let lines: Vec<String> = devices
         .iter()
@@ -218,7 +236,7 @@ pub async fn add(
         bail!("management key must not be empty");
     }
 
-    let device_tuples = select_devices(client).await?;
+    let device_tuples = select_devices(client, &[]).await?;
     let aad = format!("mgmt-key:{label}");
     let payload = crate::crypto::encrypt_for_devices(&aad, secret.as_bytes(), &device_tuples)?;
 
@@ -344,7 +362,7 @@ pub async fn keys_create(
         .create_key(&mgmt_key, label, limit, limit_reset.as_deref())
         .await?;
 
-    let stored_id = store_provisioned_key(client, mgmt_key_id, &created).await?;
+    let stored_id = store_provisioned_key(client, mgmt_key_id, &created, &[]).await?;
 
     eprintln!();
     eprintln!(
@@ -371,8 +389,9 @@ async fn store_provisioned_key(
     client: &mut Client,
     mgmt_key_id: &str,
     created: &providers::ProviderKeyCreated,
+    devices: &[String],
 ) -> Result<String> {
-    let device_tuples = select_devices(client).await?;
+    let device_tuples = select_devices(client, devices).await?;
     let aad = format!("provisioned-key:{}", created.provider_key_id);
     let payload = crate::crypto::encrypt_for_devices(
         &aad,
@@ -493,7 +512,7 @@ pub async fn keys_rotate(
              replacement failed — you now have NO active key for this identity. Retry manually.",
         )?;
 
-    let stored_id = store_provisioned_key(client, mgmt_key_id, &created).await?;
+    let stored_id = store_provisioned_key(client, mgmt_key_id, &created, &[]).await?;
 
     eprintln!();
     eprintln!(
@@ -512,6 +531,136 @@ pub async fn keys_rotate(
         mode,
     )?;
     Ok(())
+}
+
+/// Rotate a provisioned provider key AND republish it into the KV entry `kv_entry` that
+/// consumer apps source (e.g. `SOLO_FORGE_API_KEY`), with no serving gap.
+///
+/// Ordering is deliberately **create → store → publish → revoke-old** (not the
+/// delete-then-create of `keys_rotate`): the old key stays valid until the new value has
+/// been written to the KV entry, so a consumer that reads at any instant always gets a
+/// working key. The old key is revoked only *after* the new one is stored and published.
+///
+/// The raw new key is never written to stdout by default — it is written into the KV entry
+/// (server-side) and stored device-encrypted. `mode` only controls an optional
+/// non-sensitive confirmation (md5 / last-3), matching the no-print-sink direction in
+/// SECURITY.md.
+pub async fn rotate_into_kv(
+    client: &mut Client,
+    mgmt_key_id: &str,
+    provider_key_id: &str,
+    kv_entry: &str,
+    devices: &[String],
+    mode: SecretDisplay,
+) -> Result<()> {
+    let mgmt_key = decrypt_management_key(client, mgmt_key_id).await?;
+    let row = management_key_row(client, mgmt_key_id).await?;
+    let provider = providers::provider_for(&row.provider)?;
+
+    // Read the key's *current* limit/limit_reset from the provider so the replacement keeps
+    // the same identity/label/limit — not our stored defaults, which may be stale.
+    let info = provider.get_key(&mgmt_key, provider_key_id).await.context(
+        "failed to fetch current key info from provider — aborting rotation, nothing was changed",
+    )?;
+
+    // 1. Create the replacement FIRST. If this fails the old key is untouched and still
+    //    serving, so it's safe to abort loudly.
+    let created = provider
+        .create_key(
+            &mgmt_key,
+            &info.label,
+            info.limit,
+            info.limit_reset.as_deref(),
+        )
+        .await
+        .context(
+            "failed to create the replacement key on the provider — aborting rotation, \
+             nothing was changed (the old key is still active)",
+        )?;
+
+    // 2. Store the new key device-encrypted BEFORE publishing, so it is recoverable via
+    //    `kv mgmt-key keys show` even if a later step fails.
+    let stored_id = store_provisioned_key(client, mgmt_key_id, &created, devices)
+        .await
+        .context(
+            "created the replacement key on the provider but failed to store it encrypted — \
+             the old key is still active; if you are not keeping the new key, revoke it \
+             manually on the provider",
+        )?;
+
+    // 3. Publish the new value into the KV entry. Consumers re-reading this entry now pick up
+    //    the new key. The old key is still valid, so an in-flight consumer is never stranded.
+    crate::commands::kv::set(
+        client,
+        kv_entry,
+        created.plaintext_secret.clone(),
+        None,
+        false,
+        false,
+        false,
+    )
+    .await
+    .context(
+        "stored the new key but failed to write it to the KV entry — the old key was NOT \
+         revoked and consumers still use it. Retry, or publish manually.",
+    )?;
+
+    // 4. Only now revoke the OLD key on the provider — the new value is already published.
+    //    A failure here is non-fatal (the new key is live and in the KV entry); we just warn
+    //    so the operator can clean up the lingering old key.
+    match provider.revoke_key(&mgmt_key, provider_key_id).await {
+        Ok(()) => {
+            if let Err(e) = delete_local_provisioned_key(client, mgmt_key_id, provider_key_id).await
+            {
+                eprintln!(
+                    "warning: revoked the old key on the provider but failed to remove its \
+                     local record: {e:#}"
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: published the new key to '{kv_entry}' but failed to revoke the old \
+                 provider key {provider_key_id}: {e:#}"
+            );
+            eprintln!(
+                "         it is still valid on the provider — revoke it manually with \
+                 `kv mgmt-key keys revoke {mgmt_key_id} {provider_key_id}`"
+            );
+        }
+    }
+
+    eprintln!();
+    eprintln!(
+        "Rotated {} key '{}' into KV entry '{}' (new provider id: {}, stored as {})",
+        provider.id(),
+        created.label,
+        kv_entry,
+        created.provider_key_id,
+        stored_id
+    );
+    confirm_published_key(&created.plaintext_secret, mode);
+    Ok(())
+}
+
+/// Prints an optional, non-sensitive confirmation for a key that was just written into a KV
+/// entry. The raw value is *never* printed here — it already lives in the KV entry, so stdout
+/// is not the delivery channel — only a derived, non-reversible fingerprint (md5 / last-3) on
+/// request. Never fails the command.
+fn confirm_published_key(secret: &str, mode: SecretDisplay) {
+    if mode.md5 {
+        use md5::{Digest, Md5};
+        println!("{:x}", Md5::digest(secret.as_bytes()));
+    } else if mode.last3 {
+        let tail: String = {
+            let mut chars: Vec<char> = secret.chars().rev().take(3).collect();
+            chars.reverse();
+            chars.into_iter().collect()
+        };
+        println!("...{tail}");
+    } else {
+        eprintln!("The new key value was written to the KV entry; it is not printed here.");
+    }
 }
 
 pub async fn keys_show(

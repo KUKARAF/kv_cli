@@ -85,6 +85,9 @@ enum Cmd {
     /// Manage third-party provider management keys (always device-encrypted)
     #[command(subcommand, name = "mgmt-key")]
     MgmtKey(MgmtKeyCmd),
+    /// Source or rotate an app's provider key published in a named KV entry
+    #[command(subcommand, name = "provider-key")]
+    ProviderKey(ProviderKeyCmd),
     /// Show whether the current session is valid and which device it's bound to
     Status,
     /// Write the man page to stdout
@@ -239,6 +242,48 @@ enum MgmtKeyKeysCmd {
         #[arg(long)]
         return_md5_on_agent_true: bool,
         /// Print only the last 3 characters instead of the raw value (safe for non-interactive/agent use)
+        #[arg(long)]
+        show_3_last_digits_on_agent_true: bool,
+    },
+}
+
+/// Sourcing + rotation for an app's provider (e.g. OpenRouter) key that lives in a KV
+/// entry. Convention: the entry is named `<APP>_API_KEY` (e.g. `SOLO_FORGE_API_KEY`) and the
+/// consumer app sources it with `kv provider-key get <ENTRY>` (or plain `kv get <ENTRY>`)
+/// using a scoped API key, re-reading on an auth failure to pick up a rotation.
+#[derive(Subcommand)]
+enum ProviderKeyCmd {
+    /// Read an app's provider key from its KV entry (sourcing). Thin wrapper over `kv get`
+    /// with the same access model and agent-safety guards.
+    Get {
+        /// KV entry the key is published under, e.g. SOLO_FORGE_API_KEY
+        entry: String,
+        /// If this looks like an agent reading a secret directly, print its SHA-256 hash instead of the raw value
+        #[arg(long)]
+        return_md5_on_agent_true: bool,
+        /// If this looks like an agent reading a secret directly, print only the last 3 characters instead of the raw value
+        #[arg(long)]
+        show_3_last_digits_on_agent_true: bool,
+    },
+    /// Rotate the provisioned provider key and republish it into its KV entry with no serving
+    /// gap: create the replacement, store it, write it to the entry, then revoke the old key.
+    /// The raw key is written into the KV entry, never to stdout.
+    Rotate {
+        /// Management key id (as shown by `kv mgmt-key list`)
+        mgmt_key_id: String,
+        /// The provider's current key id (as shown by `kv mgmt-key keys list <mgmt_key_id>`)
+        provider_key_id: String,
+        /// KV entry to (re)publish the new key into, e.g. SOLO_FORGE_API_KEY
+        #[arg(long)]
+        kv_entry: String,
+        /// Encrypt the stored copy for this device (name or id); repeatable. Skips the
+        /// interactive picker so this can run non-interactively (e.g. scheduled rotation).
+        #[arg(long = "device")]
+        devices: Vec<String>,
+        /// If this looks like an agent, print the new key's SHA-256 hash as confirmation
+        #[arg(long)]
+        return_md5_on_agent_true: bool,
+        /// If this looks like an agent, print only the new key's last 3 characters as confirmation
         #[arg(long)]
         show_3_last_digits_on_agent_true: bool,
     },
@@ -504,6 +549,41 @@ async fn run() -> Result<()> {
                     .await?;
                 }
             },
+        },
+        Cmd::ProviderKey(provider_key_cmd) => match provider_key_cmd {
+            ProviderKeyCmd::Get {
+                entry,
+                return_md5_on_agent_true,
+                show_3_last_digits_on_agent_true,
+            } => {
+                let display = secret_display::SecretDisplay {
+                    md5: return_md5_on_agent_true,
+                    last3: show_3_last_digits_on_agent_true,
+                };
+                commands::kv::get(&mut client, &entry, None, display).await?;
+            }
+            ProviderKeyCmd::Rotate {
+                mgmt_key_id,
+                provider_key_id,
+                kv_entry,
+                devices,
+                return_md5_on_agent_true,
+                show_3_last_digits_on_agent_true,
+            } => {
+                let display = secret_display::SecretDisplay {
+                    md5: return_md5_on_agent_true,
+                    last3: show_3_last_digits_on_agent_true,
+                };
+                management_keys::rotate_into_kv(
+                    &mut client,
+                    &mgmt_key_id,
+                    &provider_key_id,
+                    &kv_entry,
+                    &devices,
+                    display,
+                )
+                .await?;
+            }
         },
         Cmd::Status => {
             commands::session::status(&mut client).await?;
