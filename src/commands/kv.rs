@@ -87,12 +87,7 @@ fn opt_f64(v: &Option<f64>) -> String {
 }
 
 fn emit_kv_secret(key: &str, value: &str, mode: SecretDisplay) -> Result<()> {
-    emit_secret(
-        &format!("the key '{key}' exists in the kv store"),
-        value,
-        mode,
-        Some(&format!("kv get {key}")),
-    )
+    emit_secret(&format!("the value of kv key '{key}'"), value, mode)
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────

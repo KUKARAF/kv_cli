@@ -353,13 +353,15 @@ pub async fn keys_create(
         created.label,
         created.provider_key_id
     );
+    eprintln!(
+        "Stored encrypted as {stored_id} — retrievable later with \
+         `kv mgmt-key keys show {mgmt_key_id} {stored_id}`."
+    );
     emit_secret(
-        "a new provisioned key was created (shown once)",
+        "a newly provisioned provider key (shown once)",
         &created.plaintext_secret,
         mode,
-        None,
     )?;
-    eprintln!("Stored encrypted as {}", stored_id);
     Ok(())
 }
 
@@ -500,13 +502,15 @@ pub async fn keys_rotate(
         created.label,
         created.provider_key_id
     );
+    eprintln!(
+        "Stored encrypted as {stored_id} — retrievable later with \
+         `kv mgmt-key keys show {mgmt_key_id} {stored_id}`."
+    );
     emit_secret(
-        "the rotated key was created (shown once)",
+        "the rotated provider key (shown once)",
         &created.plaintext_secret,
         mode,
-        None,
     )?;
-    eprintln!("Stored encrypted as {}", stored_id);
     Ok(())
 }
 
@@ -542,12 +546,9 @@ pub async fn keys_show(
         &payload.aad,
     )?;
     emit_secret(
-        "provisioned key retrieved",
+        &format!("provisioned provider key {provisioned_key_id}"),
         &String::from_utf8_lossy(&plaintext),
         mode,
-        Some(&format!(
-            "kv mgmt-key keys show {mgmt_key_id} {provisioned_key_id}"
-        )),
     )?;
     Ok(())
 }

@@ -1,4 +1,3 @@
-mod agent_detect;
 mod client;
 mod commands;
 mod config;
@@ -37,15 +36,12 @@ enum Cmd {
         /// API key token for approval-required or one-time share links
         #[arg(long)]
         token: Option<String>,
-        /// If this looks like an agent reading a secret directly, print its SHA-256 hash instead of the raw value
+        /// Print a non-secret md5 fingerprint instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         return_md5_on_agent_true: bool,
-        /// If this looks like an agent reading a secret directly, print only the last 3 characters instead of the raw value
+        /// Print only the last 3 characters instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         show_3_last_digits_on_agent_true: bool,
-        /// Print the raw secret value even if this looks like a direct agent invocation
-        #[arg(long)]
-        dangerously_show_content_on_agent_true: bool,
     },
     /// Set a value
     Set {
@@ -110,15 +106,12 @@ enum KeysCmd {
         /// KV keys this token may access, repeatable
         #[arg(long = "allow-key", value_name = "KEY")]
         allowed_keys: Vec<String>,
-        /// If this looks like an agent creating a key, print its SHA-256 hash instead of the raw value
+        /// Print a non-secret md5 fingerprint instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         return_md5_on_agent_true: bool,
-        /// If this looks like an agent creating a key, print only the last 3 characters instead of the raw value
+        /// Print only the last 3 characters instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         show_3_last_digits_on_agent_true: bool,
-        /// Print the raw new key even if this looks like a direct agent invocation
-        #[arg(long)]
-        dangerously_show_content_on_agent_true: bool,
     },
     /// Revoke an API key by ID
     Revoke { id: String },
@@ -209,15 +202,12 @@ enum MgmtKeyKeysCmd {
         /// Limit reset cadence: daily, weekly, or monthly (overrides the management key's default)
         #[arg(long)]
         limit_reset: Option<String>,
-        /// If this looks like an agent creating a key, print its SHA-256 hash instead of the raw value
+        /// Print a non-secret md5 fingerprint instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         return_md5_on_agent_true: bool,
-        /// If this looks like an agent creating a key, print only the last 3 characters instead of the raw value
+        /// Print only the last 3 characters instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         show_3_last_digits_on_agent_true: bool,
-        /// Print the raw new key even if this looks like a direct agent invocation
-        #[arg(long)]
-        dangerously_show_content_on_agent_true: bool,
     },
     /// Revoke a key on the provider
     Revoke {
@@ -232,15 +222,12 @@ enum MgmtKeyKeysCmd {
         mgmt_key_id: String,
         /// The provider's key id (as shown by `keys list`)
         provider_key_id: String,
-        /// If this looks like an agent rotating a key, print its SHA-256 hash instead of the raw value
+        /// Print a non-secret md5 fingerprint instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         return_md5_on_agent_true: bool,
-        /// If this looks like an agent rotating a key, print only the last 3 characters instead of the raw value
+        /// Print only the last 3 characters instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         show_3_last_digits_on_agent_true: bool,
-        /// Print the raw rotated key even if this looks like a direct agent invocation
-        #[arg(long)]
-        dangerously_show_content_on_agent_true: bool,
     },
     /// Decrypt and reprint a previously generated key's plaintext
     Show {
@@ -248,15 +235,12 @@ enum MgmtKeyKeysCmd {
         mgmt_key_id: String,
         /// Our stored provisioned-key id (not the provider's id)
         provisioned_key_id: String,
-        /// If this looks like an agent reading a secret directly, print its SHA-256 hash instead of the raw value
+        /// Print a non-secret md5 fingerprint instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         return_md5_on_agent_true: bool,
-        /// If this looks like an agent reading a secret directly, print only the last 3 characters instead of the raw value
+        /// Print only the last 3 characters instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         show_3_last_digits_on_agent_true: bool,
-        /// Print the raw secret value even if this looks like a direct agent invocation
-        #[arg(long)]
-        dangerously_show_content_on_agent_true: bool,
     },
 }
 
@@ -311,7 +295,6 @@ async fn run() -> Result<()> {
             token,
             return_md5_on_agent_true,
             show_3_last_digits_on_agent_true,
-            dangerously_show_content_on_agent_true,
         } => {
             let key = match key {
                 Some(k) => k,
@@ -320,7 +303,6 @@ async fn run() -> Result<()> {
             let display = secret_display::SecretDisplay {
                 md5: return_md5_on_agent_true,
                 last3: show_3_last_digits_on_agent_true,
-                dangerously_show: dangerously_show_content_on_agent_true,
             };
             commands::kv::get(&mut client, &key, token, display).await?;
         }
@@ -371,12 +353,10 @@ async fn run() -> Result<()> {
                 allowed_keys,
                 return_md5_on_agent_true,
                 show_3_last_digits_on_agent_true,
-                dangerously_show_content_on_agent_true,
             } => {
                 let display = secret_display::SecretDisplay {
                     md5: return_md5_on_agent_true,
                     last3: show_3_last_digits_on_agent_true,
-                    dangerously_show: dangerously_show_content_on_agent_true,
                 };
                 commands::keys::create(&mut client, label, r#type, allowed_keys, display).await?;
             }
@@ -465,12 +445,10 @@ async fn run() -> Result<()> {
                     limit_reset,
                     return_md5_on_agent_true,
                     show_3_last_digits_on_agent_true,
-                    dangerously_show_content_on_agent_true,
                 } => {
                     let display = secret_display::SecretDisplay {
                         md5: return_md5_on_agent_true,
                         last3: show_3_last_digits_on_agent_true,
-                        dangerously_show: dangerously_show_content_on_agent_true,
                     };
                     management_keys::keys_create(
                         &mut client,
@@ -494,12 +472,10 @@ async fn run() -> Result<()> {
                     provider_key_id,
                     return_md5_on_agent_true,
                     show_3_last_digits_on_agent_true,
-                    dangerously_show_content_on_agent_true,
                 } => {
                     let display = secret_display::SecretDisplay {
                         md5: return_md5_on_agent_true,
                         last3: show_3_last_digits_on_agent_true,
-                        dangerously_show: dangerously_show_content_on_agent_true,
                     };
                     management_keys::keys_rotate(
                         &mut client,
@@ -514,12 +490,10 @@ async fn run() -> Result<()> {
                     provisioned_key_id,
                     return_md5_on_agent_true,
                     show_3_last_digits_on_agent_true,
-                    dangerously_show_content_on_agent_true,
                 } => {
                     let display = secret_display::SecretDisplay {
                         md5: return_md5_on_agent_true,
                         last3: show_3_last_digits_on_agent_true,
-                        dangerously_show: dangerously_show_content_on_agent_true,
                     };
                     management_keys::keys_show(
                         &mut client,
