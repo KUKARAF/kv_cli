@@ -79,8 +79,8 @@ pub async fn create(
     let body_str = Client::expect_success(resp).await?;
     // Server returns JSON with `key` field or just the raw key string
     let key = extract_key_from_response(&body_str);
-    emit_secret("a new API key was created", &key, mode, None)?;
     eprintln!("⚠  Copy this key now — it will not be shown again.");
+    emit_secret("a newly created API key", &key, mode)?;
     Ok(())
 }
 
