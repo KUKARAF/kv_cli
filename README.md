@@ -82,22 +82,18 @@ model (a scoped API key via `kv add-api-token`, or a session token) and the same
 secret-display gating. The consuming app should hold a **read-only API key
 scoped to just its own entry**.
 
-Note the raw-secret gate (see `SECURITY.md`): `kv get` / `provider-key get`
-print a raw value only to an interactive terminal, after a typed confirmation —
-a pipe, a redirect, or any captured stdout (e.g. `VAR=$(kv get …)`) is refused.
-This is intentional, so there are two sourcing channels:
+`kv get` / `provider-key get` print the raw value to stdout, so it can be
+captured directly:
 
-- **A service / non-interactive consumer** reads the KV HTTP endpoint directly
-  with its scoped API key — no CLI, no TTY gate:
+```
+curl -s -H "Authorization: Bearer $(kv get SOLO_FORGE_API_KEY)" https://api.example/…
+```
 
-  ```
-  curl -fsS -H "X-Api-Key: $KV_API_KEY" https://kv.osmosis.page/kv/SOLO_FORGE_API_KEY
-  ```
+A service without the CLI can read the KV HTTP endpoint with its scoped API key:
 
-- **A human at a terminal** uses `kv provider-key get SOLO_FORGE_API_KEY` (raw,
-  after confirmation) or `--show-3-last-digits-on-agent-true` /
-  `--return-md5-on-agent-true` for a non-secret fingerprint that works
-  non-interactively.
+```
+curl -fsS -H "X-Api-Key: $KV_API_KEY" https://kv.osmosis.page/kv/SOLO_FORGE_API_KEY
+```
 
 ### Refresh model (how consumers pick up a rotation)
 
