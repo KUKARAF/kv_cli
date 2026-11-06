@@ -19,6 +19,9 @@ pub struct ProviderKeyCreated {
 
 /// A provider's own management/provisioning API — calls run client-side, using
 /// a management key decrypted locally, so kv_manager never sees the plaintext.
+// Current clippy flags the `#[must_use]` that `#[async_trait]` generates on methods returning
+// a boxed future (already must_use).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ManagementKeyProvider {
     fn id(&self) -> &'static str;

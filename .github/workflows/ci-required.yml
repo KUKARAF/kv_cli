@@ -50,6 +50,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-D warnings"
+      # Optional: a kv API key scoped to read TORBOX_API_KEY, for the live smoke step.
+      KV_SMOKE_API_KEY: ${{ secrets.KV_SMOKE_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -71,3 +73,12 @@ jobs:
 
       - name: cargo clippy (panic-safety gate + all warnings, production code only)
         run: cargo clippy --bins
+
+      - name: 'Smoke: curl -H "Authorization: Bearer $(kv get TORBOX_API_KEY)" works (mock server)'
+        env:
+          KV_SMOKE_API_KEY: ""
+        run: .github/scripts/kv-get-capture-smoke.sh
+
+      - name: 'Smoke: same against the real kv server and api.torbox.app'
+        if: ${{ env.KV_SMOKE_API_KEY != '' }}
+        run: .github/scripts/kv-get-capture-smoke.sh
