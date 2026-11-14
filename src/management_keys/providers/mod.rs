@@ -1,4 +1,5 @@
 pub mod openrouter;
+pub mod priority_notify;
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -41,6 +42,7 @@ pub trait ManagementKeyProvider {
 pub fn provider_for(name: &str) -> Result<Box<dyn ManagementKeyProvider>> {
     match name {
         "openrouter" => Ok(Box::new(openrouter::OpenRouterProvider::new()?)),
+        "priority-notify" => Ok(Box::new(priority_notify::PriorityNotifyProvider::new()?)),
         other => bail!("unsupported management key provider: {other}"),
     }
 }
