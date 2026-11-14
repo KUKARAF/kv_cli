@@ -33,7 +33,7 @@ kv delete [key]            # omit key to pick interactively with fzf
 kv add-api-token [token]   # store an API key (prompted securely if omitted)
 
 kv keys list
-kv keys create <label> [--type standard|one_time|approval_required] [--scope <pattern:perms>]
+kv keys create <label> [--type standard|one_time|approval_required|zero_trust|shareable] [--scope <pattern:perms>]
 kv keys revoke <id>
 
 kv device propose <name>   # recommended: generates a keypair, then polls until
@@ -49,6 +49,12 @@ kv session check           # exits 0 if valid, 1 if missing/expired (no output)
 kv session request [--label <label>] [--duration 7d|30d|90d|365d]
 
 kv status                  # session validity + which device it's bound to
+
+kv mgmt-key add <label> --provider openrouter|priority-notify
+kv mgmt-key list           # stored management keys and their ids
+kv mgmt-key keys create <mgmt_key_id> <label> [--device <name|id>]
+                            # priority-notify: no --limit/--limit-reset; override
+                            # its URL with PRIORITY_NOTIFY_BASE_URL
 
 kv provider-key get <entry>            # source an app's provider key from its KV entry
 kv provider-key rotate <mgmt_key_id> <provider_key_id> --kv-entry <entry> [--device <name|id>]

@@ -103,7 +103,7 @@ enum KeysCmd {
     /// Create a new API key
     Create {
         label: String,
-        /// Key type: standard, one_time, approval_required
+        /// Key type: standard, one_time, approval_required, zero_trust, shareable
         #[arg(long, default_value = "standard")]
         r#type: String,
         /// KV keys this token may access, repeatable
@@ -205,6 +205,9 @@ enum MgmtKeyKeysCmd {
         /// Limit reset cadence: daily, weekly, or monthly (overrides the management key's default)
         #[arg(long)]
         limit_reset: Option<String>,
+        /// Encrypt for this device (name or id); repeatable. Skips the interactive picker.
+        #[arg(long = "device")]
+        devices: Vec<String>,
         /// Print a non-secret md5 fingerprint instead of the raw value (safe for non-interactive/agent use)
         #[arg(long)]
         return_md5_on_agent_true: bool,
@@ -488,6 +491,7 @@ async fn run() -> Result<()> {
                     label,
                     limit,
                     limit_reset,
+                    devices,
                     return_md5_on_agent_true,
                     show_3_last_digits_on_agent_true,
                 } => {
@@ -501,6 +505,7 @@ async fn run() -> Result<()> {
                         &label,
                         limit,
                         limit_reset,
+                        &devices,
                         display,
                     )
                     .await?;

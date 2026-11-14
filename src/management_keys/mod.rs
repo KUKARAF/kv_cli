@@ -349,6 +349,7 @@ pub async fn keys_create(
     label: &str,
     limit: Option<f64>,
     limit_reset: Option<String>,
+    devices: &[String],
     mode: SecretDisplay,
 ) -> Result<()> {
     validate_limit_reset(&limit_reset)?;
@@ -362,7 +363,7 @@ pub async fn keys_create(
         .create_key(&mgmt_key, label, limit, limit_reset.as_deref())
         .await?;
 
-    let stored_id = store_provisioned_key(client, mgmt_key_id, &created, &[]).await?;
+    let stored_id = store_provisioned_key(client, mgmt_key_id, &created, devices).await?;
 
     eprintln!();
     eprintln!(
