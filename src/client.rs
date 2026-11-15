@@ -111,6 +111,9 @@ struct SessionRequestCreated {
     /// Required to poll for the session token — proves the poller is the same party
     /// that created the request, not just someone who saw the id in the URL/QR.
     poll_secret: String,
+    /// Approval code the admin must type into the approval page. Shown only here, on the
+    /// requesting device — it is deliberately not part of `url`.
+    approve_token: String,
 }
 
 #[derive(Deserialize)]
@@ -288,12 +291,16 @@ impl Client {
         eprintln!();
         eprintln!("  Approval URL:");
         eprintln!("  {}", created.url);
+        eprintln!(
+            "  Approval code (enter it on the approval page): {}",
+            created.approve_token
+        );
         eprintln!("  Expires: {}", created.expires_at);
         eprintln!();
 
         print_qr(&created.url);
 
-        eprintln!("  Open the URL or scan the QR code and click Approve.");
+        eprintln!("  Open the URL or scan the QR code, enter the approval code and click Approve.");
         eprintln!("  Polling every 5s.  Press  Ctrl+C  to cancel.");
         eprintln!();
 
@@ -552,6 +559,7 @@ impl Client {
             id: created.id.clone(),
             poll_secret: created.poll_secret.clone(),
             url: created.url.clone(),
+            approve_token: created.approve_token.clone(),
             expires_at: created.expires_at.clone(),
         };
         self.cfg.pending_session_request = Some(pending.clone());
@@ -564,9 +572,15 @@ impl Client {
         eprintln!();
         eprintln!("  {headline}");
         eprintln!("  {}", created.url);
+        eprintln!(
+            "  Approval code (enter it on the approval page): {}",
+            created.approve_token
+        );
         eprintln!("  Expires: {}", created.expires_at);
         print_qr(&created.url);
-        eprintln!("  Open the link (or QR) and click Approve, then re-run your command.");
+        eprintln!(
+            "  Open the link (or QR), enter the approval code and click Approve, then re-run your command."
+        );
         eprintln!();
         Ok(())
     }
@@ -589,6 +603,9 @@ impl Client {
                     eprintln!();
                     eprintln!("  session approval still pending — approve:");
                     eprintln!("  {}", pending.url);
+                    if !pending.approve_token.is_empty() {
+                        eprintln!("  Approval code: {}", pending.approve_token);
+                    }
                     eprintln!("  Then re-run your command.");
                     eprintln!();
                     return Err(SessionApprovalPending.into());

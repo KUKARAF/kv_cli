@@ -25,6 +25,9 @@ pub struct PendingSessionRequest {
     /// Proves the poller created the request (not just someone who saw the id).
     pub poll_secret: String,
     pub url: String,
+    /// Approval code the admin types into the approval page (empty for older saved state).
+    #[serde(default)]
+    pub approve_token: String,
     pub expires_at: String,
 }
 
